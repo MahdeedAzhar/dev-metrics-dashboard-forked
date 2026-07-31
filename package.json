@@ -1,0 +1,14 @@
+{
+  "name": "dev-metrics-dashboard",
+  "version": "1.0.0",
+  "private": true,
+  "description": "PR velocity and AI-contribution dashboard for the Xiangqi dev team",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node --env-file=.env src/index.js",
+    "test": "node --test"
+  }
+}
