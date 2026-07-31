@@ -1,13 +1,17 @@
-# Dev PR Velocity & AI-Contribution Dashboard
+# Engineering Delivery & AI Insights Dashboard
 
-Replaces a manually-maintained spreadsheet with an on-demand tool that pulls real
-GitHub PR data and Jira ticket data, and generates a self-contained HTML dashboard
-covering PR velocity, review/merge turnaround, AI-assisted contribution (parsed
-from the AI Contribution Checklist already embedded in PR bodies), and stale/gap
-flags for PRs that have been open far longer than their story points would predict.
+Replaces a manually-maintained Google Sheet with a tool that pulls delivery data
+directly from Jira (Story Points, Actual Points, AI Contribution Percentage —
+all native Jira fields already in use) and generates a self-contained,
+interactive HTML dashboard organized around:
 
-It's a script you run on demand, not a live service — each run fetches whatever's
-new since the last run, recomputes everything fresh, and (re)writes `dashboard.html`.
+> **Release → Ticket → Developer → SP (planned) → AP (delivered) → AI Contribution → Linked PR(s) as evidence**
+
+This is a transparent delivery-visibility tool, not an automated performance
+evaluation system: there is no composite score, no On Track/Watch/At Risk
+label, and no ranking. It surfaces what was planned, what was delivered, how
+that was distributed across the team, and how AI was involved — GitHub PRs
+appear only as supporting evidence linked to each ticket.
 
 ## Setup
 
@@ -16,8 +20,8 @@ cp .env.example .env
 # fill in GITHUB_TOKEN, JIRA_EMAIL, JIRA_API_TOKEN in .env
 ```
 
-- `GITHUB_TOKEN`: a GitHub personal access token with read access to the repos in
-  `config/config.js` (PRs, reviews, comments).
+- `GITHUB_TOKEN`: a GitHub personal access token with read access to the repos
+  in `config/config.js` (used only to find PRs as evidence for Jira tickets).
 - `JIRA_EMAIL` / `JIRA_API_TOKEN`: a Jira Cloud API token
   (id.atlassian.com → Security → API tokens) for `JIRA_BASE_URL`
   (defaults to `https://arbisoft.atlassian.net`).
@@ -27,102 +31,98 @@ Requires Node.js 20+.
 ## Usage
 
 ```bash
-npm start                    # fetch + regenerate the dashboard
-npm start -- --since 2026-06-01   # override the reporting window's start date
-npm start -- --refresh-jira  # force-refresh all linked Jira tickets, not just changed/stale ones
-npm start -- --release 8.6.0 # scope to every PR linked to a Jira fixVersion, instead of a calendar window
+npm start                                # generate the dashboard for config.releasesToTrack
+npm start -- --releases "8.5.0,8.6.0"    # override which releases to include in this run
 ```
 
 Output:
-- `data/output/dashboard.html` — open this in a browser. Re-run the script any
-  time to refresh it with the latest data.
-- `data/output/aggregated.json` — the same data as JSON, useful for debugging or
-  feeding into something else.
-- `data/cache/` — raw GitHub PR/review data and Jira issue data, cached locally so
-  re-runs only fetch what changed since the last run.
+- `data/output/dashboard.html` — open this in a browser. The release picker,
+  developer drill-down, sorting, and filtering all happen live in the page —
+  no re-running the script needed to explore what's already in the file.
+- `data/output/bundle.json` — the same `{releases, tickets}` data as JSON,
+  useful for debugging.
+- `data/cache/` — raw GitHub PR data and the last-fetched Jira ticket set,
+  cached locally so re-runs only re-fetch GitHub PRs that changed. Jira
+  tickets are always refetched in full on every run (SP/AP/AI% are actively
+  edited throughout a release, so staleness matters more here than PR data).
 
 ## Configuration
 
-Everything tunable lives in `config/config.js` — repos tracked, the SP→expected-days
-heuristic, the stale-PR ratio threshold, composite score weights, color band
-cutoffs, and the gap-detection threshold. Change constants there, not code.
+Everything tunable lives in `config/config.js`:
+- `repos`: GitHub repos to search for PR evidence.
+- `releasesToTrack`: the Jira fixVersions a run includes by default (override
+  per-run with `--releases`). Deliberately an explicit list, not
+  auto-discovered — a stale list is easy to notice and fix.
+- `jiraStoryPointsFieldId`, `jiraActualPointsFieldId`, `jiraAiContributionFieldId`:
+  confirmed live against real tickets on this Jira instance, not guessed.
+  **Note**: the AI Contribution field is stored in Jira as a 0–1 fraction —
+  the tool multiplies by 100 for display; re-verify this if pointing at a
+  different Jira instance.
+- `lookbackDays`: how far back the GitHub PR cache reaches, which bounds how
+  complete the ticket → PR evidence links can be.
 
-Notably:
-- `repos`: starts with `bvs-xiangqi/xiangqi-client` and `bvs-xiangqi/xiangqi-server`.
-  Add more as `"org/repo"` strings.
-- `jiraStoryPointsFieldId`: confirmed live against a real ticket (XQ-5043) on this
-  Jira instance. Custom field IDs are per-Jira-site, so re-verify if this ever
-  points at a different Jira instance.
+## How the dashboard works
 
-## How scoring works
+All four sections recompute live in the browser as you change the release
+selection — nothing is pre-aggregated server-side, because "% of highest AP"
+and "% of team AP" only mean something relative to whichever release(s) are
+currently selected:
 
-Each developer's **composite score** (0–100, shown with a green/yellow/red rating)
-is a weighted average of three sub-scores, each independently visible on their
-scorecard so the number is never a black box:
+1. **Release Summary** — total tickets, completed/remaining, total planned SP,
+   total delivered AP, team AI contribution (averaged only over tickets with a
+   recorded value, with a coverage count shown alongside it).
+2. **Developer Delivery** — one row per developer: tickets, planned SP,
+   delivered AP, % of the highest AP delivered by anyone in the current
+   selection, % of the team's total AP, and average AI contribution. Click a
+   row to jump to that developer's tickets below.
+3. **Developer Details** — the selected developer's own tickets: key (linked
+   to Jira), summary, status, SP, AP, AI contribution, and linked PR(s)
+   (linked to GitHub). No linked PR shows as "No linked PR found" — this is
+   neutral, not a negative signal.
+4. **All Release Tickets** — every ticket in the selected release(s),
+   filterable by developer/status/issue type and sortable by SP/AP/AI
+   contribution.
 
-- **Speed (40%)** — how a merged PR's actual time-to-merge compares to the
-  duration its SP implies (capped at 100 for finishing early, not rewarded
-  beyond). SP is resolved **Jira Story Points first** (set at planning time,
-  not self-reported per-PR), falling back to the PR body's own Planned/Actual
-  SP fields only when Jira has none — a PR author can't inflate their own SP
-  in the PR description to make Speed look better.
-- **Quality (30%)** — first-pass approval rate (merged with zero
-  "changes requested" reviews) as a proxy for review quality. There's no
-  separate defect/QA data source wired up yet — treat this as a proxy, not a
-  full picture.
-- **AI Leverage (30%)** — blends two signals: the PR-body AI Contribution
-  Checklist (self-reported, can be skipped) and the share of a PR's **commits
-  carrying a "Co-Authored-By: Claude ..." trailer** (structured, present on
-  nearly every AI-assisted commit, much harder to game). When both exist for a
-  PR they're averaged; when only one exists, that one is used; a PR with
-  neither is excluded from the average, never scored as 0.
+Selecting multiple releases doesn't double-count a ticket that belongs to more
+than one — the underlying dataset is a flat map keyed by ticket key, so
+selecting several releases is just "tickets whose fixVersions intersect the
+selection," and a ticket in two selected releases is still one ticket.
 
-**Each sub-score's weight is additionally scaled by its own data coverage.**
-A Speed score built from 2 of a developer's 10 merged PRs (because the other 8
-had no SP anywhere) pulls a small fraction of its normal 40% weight instead of
-counting the same as a score built from 9 of 10 — this is what stops a small,
-favorable sample from producing a misleadingly high composite. Coverage is
-shown directly on every meter, with a low-sample caveat below ~50%.
+AP (Actual Points) and AI Contribution are pulled directly from Jira, not
+derived from PRs — PRs are matched to tickets by ticket ID (parsed from the PR
+title/body) purely to surface as supporting evidence, and they carry two of
+their own signals for context: the self-reported AI Contribution Checklist
+from the PR body, and the share of the PR's commits carrying a
+"Co-Authored-By: Claude ..." trailer (structured, harder to game). Neither
+feeds any Jira-level number or any score — there is no score.
 
-**PR volume is tracked separately, not folded into the composite.** Each
-developer's PRs-opened count is compared against the team's median for the
-window; falling below half that median trips a `LOW_VOLUME` flag on the
-scorecard and in the full-metrics table (config: `lowVolumeRatioThreshold`).
-It's deliberately a flag rather than a score deduction, since a lower PR count
-isn't inherently bad (could mean fewer, larger tickets) — it's a prompt to look
-closer, which the scorecard's open-PR list right below it lets you do.
+## Validating against the manual Google Sheet
 
-Weights, color-band cutoffs, the stale-PR ratio threshold, and the low-volume
-threshold are all value judgments the team already made once — see
-`config/config.js` for the current numbers and the project's plan doc for the
-reasoning.
+```bash
+node --env-file=.env scripts/validateAgainstSheet.js --csv <path-to-export.csv> --release "8.6.0"
+```
 
-## Scoping to a release
-
-`npm start -- --release 8.6.0` filters to every PR whose linked Jira ticket has
-that fixVersion, instead of a calendar window — useful for "how did 8.6.0 go"
-reporting rather than "last 14 days." This only sees PRs within `lookbackDays`
-(default 90) of the cache, so bump that config value first if scoping to an
-older or longer-running release.
+Export the sheet's relevant tab as CSV, then run this to diff it against the
+tool's own Jira-fetched data for that release: ticket count, assignees, SP
+totals, AP totals, AI contribution (with a unit sanity check — warns if the
+sheet's AI column looks like a 0–1 fraction instead of 0–100), developer-level
+SP/AP, and release membership, all compared both directions. Add `--json` for
+machine-readable output. This runs the *same* fetch/normalize code path the
+dashboard itself uses, so a mismatch means real data disagreement, not two
+independently-buggy implementations agreeing with each other.
 
 ## Known limitations
 
-- **Reviewer bottlenecks leak into Speed.** Time-to-merge partly reflects how
-  fast a reviewer responded, not just the author's own pace — the dashboard
-  shows raw time-to-review alongside it for context.
-- **Multiple concurrently-open PRs**: gap-justification anchors on the single
-  open PR with the largest SP-implied duration, not a sum of all open PRs.
-- **AI Contribution Checklist data is only as good as what's in the PR body** —
-  older PRs, or PRs not opened via the `/create-pr` Claude Code workflow, won't
-  have it. The commit co-authorship signal covers most of that gap, but a PR
-  with neither a checklist nor any AI-co-authored commits is still excluded
-  from AI-leverage scoring (never assumed 0).
-- **The "team median PR duration" fallback** (used for stale-PR detection when
-  a PR has no SP anywhere) is computed only from PRs that *do* have an SP —
-  pooling in trivial one-line/config PRs would drag it toward a near-zero
-  "typical duration" and make every unestimated open PR look wildly stale.
-- **Low-volume flag is a prompt, not a verdict** — it doesn't know if a
-  developer's tickets were larger/harder; check their open-PR list and Jira
-  tickets before drawing a conclusion from the flag alone.
-- **`xiangqi-server`'s exact GitHub slug** was confirmed via its local git remote,
-  but if repos are added later, always confirm the exact `org/repo` slug first.
+- **Ticket → PR evidence is only as complete as the GitHub PR cache's fetch
+  window** (`lookbackDays`, default 90) — a ticket resolved via a PR merged
+  long before that window won't show evidence here even though one exists on
+  GitHub. This is treated as neutral ("no linked PR found"), never negative.
+- **Developer identity is strictly the Jira assignee** — there's no mapping
+  between a GitHub PR author and a Jira assignee, so a ticket's evidence PRs
+  may have been authored by someone other than the ticket's assignee (e.g. a
+  teammate picking up a PR). This is expected and not flagged as a discrepancy.
+- **AP and AI Contribution reflect whatever is currently recorded in Jira** —
+  if a ticket hasn't been updated with its actual points or AI contribution
+  yet, those show as "not yet recorded" (blank), never estimated or assumed 0.
+- **`releasesToTrack` is a manually maintained list** — add a new release to
+  `config/config.js` (or pass `--releases`) when one starts.

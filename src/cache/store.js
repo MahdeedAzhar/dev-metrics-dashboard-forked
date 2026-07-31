@@ -34,8 +34,8 @@ export function githubWatermarkPath(repo) {
   return path.join(cacheRoot, 'github', `${repoSlug(repo)}.watermark.json`);
 }
 
-export function jiraCachePath() {
-  return path.join(cacheRoot, 'jira', 'issues.json');
+export function jiraTicketsCachePath() {
+  return path.join(cacheRoot, 'jira', 'tickets.json');
 }
 
 export function readGithubCache(repo) {
@@ -54,12 +54,12 @@ export function writeWatermark(repo, watermark) {
   writeJson(githubWatermarkPath(repo), watermark);
 }
 
-export function readJiraCache() {
-  return readJson(jiraCachePath(), {});
+export function readJiraTicketsCache() {
+  return readJson(jiraTicketsCachePath(), {});
 }
 
-export function writeJiraCache(issuesByKey) {
-  writeJson(jiraCachePath(), issuesByKey);
+export function writeJiraTicketsCache(ticketsByKey) {
+  writeJson(jiraTicketsCachePath(), ticketsByKey);
 }
 
 export function writeOutput(name, data) {

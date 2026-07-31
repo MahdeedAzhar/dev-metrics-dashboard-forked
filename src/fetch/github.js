@@ -64,85 +64,25 @@ export async function fetchNewOrUpdatedPullRequests(repo, lastUpdatedAtSeen) {
   return results;
 }
 
-export async function fetchPullRequestReviews(repo, number) {
-  const [owner, name] = repo.split('/');
-  return githubGetJson(`${API_BASE}/repos/${owner}/${name}/pulls/${number}/reviews?per_page=100`);
-}
-
-export async function fetchPullRequestReviewComments(repo, number) {
-  const [owner, name] = repo.split('/');
-  return githubGetJson(`${API_BASE}/repos/${owner}/${name}/pulls/${number}/comments?per_page=100`);
-}
-
-export async function fetchIssueComments(repo, number) {
-  const [owner, name] = repo.split('/');
-  return githubGetJson(`${API_BASE}/repos/${owner}/${name}/issues/${number}/comments?per_page=100`);
-}
-
 export async function fetchPullRequestCommits(repo, number) {
   const [owner, name] = repo.split('/');
   return githubGetJson(`${API_BASE}/repos/${owner}/${name}/pulls/${number}/commits?per_page=100`);
 }
 
 /**
- * Derives review-turnaround fields from a PR's reviews/comments, excluding the
- * PR author's own activity and bot accounts (a self-comment isn't a review).
- */
-export function deriveReviewTimestamps(prAuthorLogin, { reviews, reviewComments, issueComments }) {
-  const isOtherHuman = (login, type) =>
-    login && login !== prAuthorLogin && type !== 'Bot' && !login.endsWith('[bot]');
-
-  const candidateTimestamps = [
-    ...reviews
-      .filter((r) => isOtherHuman(r.user?.login, r.user?.type))
-      .map((r) => r.submitted_at),
-    ...reviewComments
-      .filter((c) => isOtherHuman(c.user?.login, c.user?.type))
-      .map((c) => c.created_at),
-    ...issueComments
-      .filter((c) => isOtherHuman(c.user?.login, c.user?.type))
-      .map((c) => c.created_at),
-  ].filter(Boolean);
-
-  const approvals = reviews
-    .filter((r) => r.state === 'APPROVED' && isOtherHuman(r.user?.login, r.user?.type))
-    .map((r) => r.submitted_at)
-    .filter(Boolean)
-    .sort();
-
-  const firstApprovalAt = approvals[0] ?? null;
-
-  const changesRequestedBeforeApproval = reviews.filter(
-    (r) =>
-      r.state === 'CHANGES_REQUESTED' &&
-      isOtherHuman(r.user?.login, r.user?.type) &&
-      (!firstApprovalAt || new Date(r.submitted_at).getTime() < new Date(firstApprovalAt).getTime()),
-  ).length;
-
-  return {
-    first_review_at: candidateTimestamps.sort()[0] ?? null,
-    first_approval_at: firstApprovalAt,
-    review_cycle_count: changesRequestedBeforeApproval,
-  };
-}
-
-/**
- * Fetches everything needed to derive review timestamps and commit-level AI
- * co-authorship for a single PR. Callers should only invoke this for new/changed
- * PRs (see the watermark logic in fetchNewOrUpdatedPullRequests) — it's 4 API
- * calls per PR.
+ * Fetches everything needed to derive commit-level AI co-authorship for a
+ * single PR. Only 1 API call per PR — this dashboard is Jira-centric now, so
+ * PR review/comment timing (which used to cost 3 more calls per PR) is no
+ * longer computed anywhere; PRs are supporting evidence, not a scored metric.
+ * Callers should only invoke this for new/changed PRs (see the watermark logic
+ * in fetchNewOrUpdatedPullRequests).
  */
 export async function fetchPullRequestActivity(repo, number) {
   try {
-    const [reviews, reviewComments, issueComments, commits] = await Promise.all([
-      fetchPullRequestReviews(repo, number),
-      fetchPullRequestReviewComments(repo, number),
-      fetchIssueComments(repo, number),
-      fetchPullRequestCommits(repo, number),
-    ]);
-    return { reviews, reviewComments, issueComments, commits };
+    const commits = await fetchPullRequestCommits(repo, number);
+    return { commits };
   } catch (error) {
     warn(`Failed to fetch activity for ${repo}#${number}: ${error.message}`);
-    return { reviews: [], reviewComments: [], issueComments: [], commits: [] };
+    return { commits: [] };
   }
 }
