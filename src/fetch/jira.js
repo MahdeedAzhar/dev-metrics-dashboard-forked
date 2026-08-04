@@ -21,6 +21,8 @@ const TICKET_FIELDS = [
   'status',
   'assignee',
   'fixVersions',
+  'created',
+  'updated',
   'resolutiondate',
   jiraStoryPointsFieldId,
   jiraActualPointsFieldId,

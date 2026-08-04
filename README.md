@@ -60,28 +60,49 @@ Everything tunable lives in `config/config.js`:
   different Jira instance.
 - `lookbackDays`: how far back the GitHub PR cache reaches, which bounds how
   complete the ticket → PR evidence links can be.
+- `stalePrAfterDays` (default 14): how long a PR must have been open to show up
+  in the PR Activity Trend's stale list — a team-level, purely descriptive
+  fact, never attributed to whoever opened it.
 
 ## How the dashboard works
 
-All four sections recompute live in the browser as you change the release
-selection — nothing is pre-aggregated server-side, because "% of highest AP"
-and "% of team AP" only mean something relative to whichever release(s) are
-currently selected:
+Every section recomputes live in the browser as you change the release
+selection — nothing is pre-aggregated server-side, because "% of highest AP,"
+the activity trends, and the cycle-time distribution only mean something
+relative to whichever release(s) are currently selected:
 
 1. **Release Summary** — total tickets, completed/remaining, total planned SP,
    total delivered AP, team AI contribution (averaged only over tickets with a
    recorded value, with a coverage count shown alongside it).
-2. **Developer Delivery** — one row per developer: tickets, planned SP,
+2. **Release Progress Over Time** — cumulative delivered AP against a flat
+   "total planned SP" reference line, and cumulative tickets completed, both
+   by resolution date — shows whether delivery is steady or back-loaded.
+3. **Ticket Status Breakdown** — current split of To Do / In Progress / Done.
+4. **Issue Type Breakdown** — ticket count / planned SP / delivered AP faceted
+   by issue type (Bug, Story, Task, etc.).
+5. **Engineering Activity Trend** — per-day counts of PRs opened, PRs merged,
+   tickets moving to In Progress, and tickets completed. Purely descriptive —
+   not an "activity score."
+6. **PR Activity Trend** — PRs opened/merged over time, how many are currently
+   open, average open-PR age, and a team-level (never per-developer) list of
+   PRs open longer than `stalePrAfterDays`.
+7. **Delivery Flow: In Progress → Code Review** — mean and median hours from a
+   ticket's first move into "In Progress" to its first subsequent move into
+   "Code Review" (median shown alongside the mean, since averages mislead
+   here), a fixed-bucket histogram of the distribution, and a list of tickets
+   currently aging in "In Progress" with no Code Review transition yet.
+8. **Developer Delivery** — one row per developer: tickets, planned SP,
    delivered AP, % of the highest AP delivered by anyone in the current
    selection, % of the team's total AP, and average AI contribution. Click a
    row to jump to that developer's tickets below.
-3. **Developer Details** — the selected developer's own tickets: key (linked
-   to Jira), summary, status, SP, AP, AI contribution, and linked PR(s)
-   (linked to GitHub). No linked PR shows as "No linked PR found" — this is
-   neutral, not a negative signal.
-4. **All Release Tickets** — every ticket in the selected release(s),
-   filterable by developer/status/issue type and sortable by SP/AP/AI
-   contribution.
+9. **Developer Details** — the selected developer's own tickets (key linked to
+   Jira, summary, status, SP, AP, AI contribution, linked PR(s) linked to
+   GitHub — "No linked PR found" is neutral, never a negative signal), plus a
+   personal activity timeline (tickets completed, PRs opened/merged over
+   time) — never a comparison against anyone else.
+10. **All Release Tickets** — every ticket in the selected release(s),
+    filterable by developer/status/issue type and sortable by SP/AP/AI
+    contribution.
 
 Selecting multiple releases doesn't double-count a ticket that belongs to more
 than one — the underlying dataset is a flat map keyed by ticket key, so
@@ -95,6 +116,19 @@ their own signals for context: the self-reported AI Contribution Checklist
 from the PR body, and the share of the PR's commits carrying a
 "Co-Authored-By: Claude ..." trailer (structured, harder to game). Neither
 feeds any Jira-level number or any score — there is no score.
+
+### Cycle-time data (changelog)
+
+The bulk Jira search endpoint doesn't return status-change history, so
+cycle-time needs one extra API call per ticket
+(`GET /rest/api/3/issue/{key}/changelog`). Unlike ticket fields (always
+refetched in full — one cheap call regardless of ticket count), changelogs are
+cached per ticket in `data/cache/jira/changelogs.json`, keyed by that ticket's
+own Jira `updated` timestamp: a ticket's changelog is only refetched when
+`updated` has changed since it was last cached. `updated` changes on *any*
+field edit, not just a status transition, so this may occasionally refetch a
+changelog that didn't actually change — but it will never skip a refetch that
+was needed.
 
 ## Validating against the manual Google Sheet
 
@@ -126,3 +160,12 @@ independently-buggy implementations agreeing with each other.
   yet, those show as "not yet recorded" (blank), never estimated or assumed 0.
 - **`releasesToTrack` is a manually maintained list** — add a new release to
   `config/config.js` (or pass `--releases`) when one starts.
+- **Cycle-time uses the *first* "In Progress" → *first subsequent* "Code
+  Review" transition** — tickets that cycle Code Review ↔ Internal QA
+  (confirmed happening in real data) are handled correctly, but a ticket
+  created directly into "In Progress" (skipping that transition entirely) has
+  no recorded starting point, so it shows no cycle-time value — a disclosed
+  gap, not an estimate.
+- **Developer Activity Timeline's PR data comes from the developer's assigned
+  tickets' linked PRs**, not GitHub PR authorship — consistent with the
+  no-GitHub-login-mapping decision above.

@@ -38,6 +38,10 @@ export function jiraTicketsCachePath() {
   return path.join(cacheRoot, 'jira', 'tickets.json');
 }
 
+export function jiraChangelogsCachePath() {
+  return path.join(cacheRoot, 'jira', 'changelogs.json');
+}
+
 export function readGithubCache(repo) {
   return readJson(githubCachePath(repo), {});
 }
@@ -60,6 +64,20 @@ export function readJiraTicketsCache() {
 
 export function writeJiraTicketsCache(ticketsByKey) {
   writeJson(jiraTicketsCachePath(), ticketsByKey);
+}
+
+/**
+ * Changelog is expensive (1 API call per ticket, unlike the cheap single-call
+ * bulk fields fetch), so unlike tickets.json this is cached per-ticket rather
+ * than always refetched — see src/index.js for the `updated`-timestamp-keyed
+ * invalidation this cache is designed around.
+ */
+export function readJiraChangelogsCache() {
+  return readJson(jiraChangelogsCachePath(), {});
+}
+
+export function writeJiraChangelogsCache(changelogsByKey) {
+  writeJson(jiraChangelogsCachePath(), changelogsByKey);
 }
 
 export function writeOutput(name, data) {

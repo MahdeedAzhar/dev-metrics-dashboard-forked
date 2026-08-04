@@ -5,6 +5,8 @@ function toEvidence(pr) {
     pr_url: `https://github.com/${pr.repo}/pull/${pr.number}`,
     pr_title: pr.title,
     pr_state: pr.state,
+    pr_created_at: pr.created_at ?? null,
+    pr_merged_at: pr.merged_at ?? null,
     pr_ai_checklist_percent: pr.ai_contribution?.checklist_score_percent ?? null,
     pr_commit_co_author_percent: pr.ai_contribution?.commit_ai_percent ?? null,
   };

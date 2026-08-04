@@ -18,6 +18,7 @@ const DONE_TICKET = {
     customfield_10833: 3,
     customfield_11729: 0.87,
     fixVersions: [{ id: '16212', name: '8.5.0', released: true, releaseDate: '2026-07-16' }],
+    created: '2026-06-30T10:00:00.000+0500',
     resolutiondate: '2026-07-15T10:00:00.000+0500',
   },
 };
@@ -107,4 +108,28 @@ test('normalizeJiraIssue attaches PR evidence from the index when present', () =
   const prIndex = new Map([['XQ-4821', evidence]]);
   const record = normalizeJiraIssue(DONE_TICKET, prIndex, BASE_URL);
   assert.deepEqual(record.linked_prs, evidence);
+});
+
+test('normalizeJiraIssue extracts the created_at date', () => {
+  const record = normalizeJiraIssue(DONE_TICKET, new Map(), BASE_URL);
+  assert.equal(record.created_at, '2026-06-30T10:00:00.000+0500');
+});
+
+test('normalizeJiraIssue derives cycle-time fields from the changelog map when present', () => {
+  const changelog = [
+    { created: '2026-07-05T00:00:00Z', items: [{ field: 'status', fromString: 'To Do', toString: 'In Progress' }] },
+    { created: '2026-07-07T00:00:00Z', items: [{ field: 'status', fromString: 'In Progress', toString: 'Code Review' }] },
+  ];
+  const changelogByKey = new Map([['XQ-4821', changelog]]);
+  const record = normalizeJiraIssue(DONE_TICKET, new Map(), BASE_URL, changelogByKey);
+  assert.equal(record.first_in_progress_at, new Date('2026-07-05T00:00:00Z').toISOString());
+  assert.equal(record.first_code_review_at_after_in_progress, new Date('2026-07-07T00:00:00Z').toISOString());
+  assert.equal(record.in_progress_to_code_review_hours, 48);
+});
+
+test('normalizeJiraIssue defaults cycle-time fields to null when no changelog is provided', () => {
+  const record = normalizeJiraIssue(DONE_TICKET, new Map(), BASE_URL);
+  assert.equal(record.first_in_progress_at, null);
+  assert.equal(record.first_code_review_at_after_in_progress, null);
+  assert.equal(record.in_progress_to_code_review_hours, null);
 });

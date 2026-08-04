@@ -1,6 +1,7 @@
-import { repos, lookbackDays, releasesToTrack } from '../config/config.js';
+import { repos, lookbackDays, releasesToTrack, stalePrAfterDays } from '../config/config.js';
 import { fetchNewOrUpdatedPullRequests, fetchPullRequestActivity } from './fetch/github.js';
 import { fetchTicketsByFixVersions } from './fetch/jira.js';
+import { fetchTicketChangelog } from './fetch/jiraChangelog.js';
 import { extractTicketId } from './parse/ticketId.js';
 import { parseAiChecklist, combineAiSignals } from './parse/aiChecklist.js';
 import { computeCommitAiPercent } from './parse/commitCoAuthorship.js';
@@ -13,6 +14,8 @@ import {
   readWatermark,
   writeWatermark,
   writeJiraTicketsCache,
+  readJiraChangelogsCache,
+  writeJiraChangelogsCache,
   writeOutput,
 } from './cache/store.js';
 import { log, warn } from './utils/logger.js';
@@ -34,6 +37,7 @@ function buildPrRecord(repo, rawPr, activity) {
     title: rawPr.title,
     state: rawPr.merged_at ? 'merged' : rawPr.state,
     created_at: rawPr.created_at,
+    merged_at: rawPr.merged_at,
     updated_at: rawPr.updated_at,
     linked_ticket_id: ticketId,
     ticket_source: source,
@@ -81,6 +85,39 @@ async function syncRepo(repo, lookbackCutoffIso) {
   return Object.values(cache);
 }
 
+/**
+ * Fetches each ticket's status-change history, needed for the In Progress ->
+ * Code Review cycle-time metric. Unlike the ticket fields (one cheap bulk JQL
+ * call regardless of ticket count), changelog is ~1 API call per ticket, so
+ * it's cached per-ticket keyed by that ticket's own Jira `updated` timestamp —
+ * `updated` changes on any field edit, not just a status transition, so this
+ * is a conservative invalidation key that never under-fetches (it may refetch
+ * a changelog whose status history didn't actually change, but never skips a
+ * refetch that was needed).
+ */
+async function syncChangelogs(rawIssues) {
+  const cache = readJiraChangelogsCache();
+  const toFetch = rawIssues.filter((issue) => cache[issue.key]?.cachedForUpdated !== issue.fields.updated);
+  log(`Changelogs: ${toFetch.length} ticket(s) need (re)fetching, ${rawIssues.length - toFetch.length} unchanged since last cache`);
+
+  for (let i = 0; i < toFetch.length; i += 1) {
+    const issue = toFetch[i];
+    // eslint-disable-next-line no-await-in-loop
+    const values = await fetchTicketChangelog(issue.key);
+    cache[issue.key] = { cachedForUpdated: issue.fields.updated, values };
+    writeJiraChangelogsCache(cache);
+    if ((i + 1) % 10 === 0 || i === toFetch.length - 1) {
+      log(`Changelogs: fetched ${i + 1}/${toFetch.length}`);
+    }
+  }
+
+  const changelogByKey = new Map();
+  for (const issue of rawIssues) {
+    changelogByKey.set(issue.key, cache[issue.key]?.values ?? []);
+  }
+  return changelogByKey;
+}
+
 /** First-seen fixVersion metadata for each configured release, plus any configured release with 0 matched tickets (still listed so the picker shows it). */
 function buildReleaseMeta(ticketsByKey, releases) {
   const seen = new Map();
@@ -121,11 +158,12 @@ async function main() {
   log(`Found ${rawIssues.length} ticket(s) across the configured release(s)`);
 
   const ticketPrIndex = buildTicketPrIndex(allPrRecords);
+  const changelogByKey = await syncChangelogs(rawIssues);
   const jiraBaseUrl = process.env.JIRA_BASE_URL;
 
   const ticketsByKey = {};
   for (const issue of rawIssues) {
-    ticketsByKey[issue.key] = normalizeJiraIssue(issue, ticketPrIndex, jiraBaseUrl);
+    ticketsByKey[issue.key] = normalizeJiraIssue(issue, ticketPrIndex, jiraBaseUrl, changelogByKey);
   }
   writeJiraTicketsCache(ticketsByKey);
 
@@ -133,6 +171,7 @@ async function main() {
     generated_at: now.toISOString(),
     releases: buildReleaseMeta(ticketsByKey, releases),
     tickets: ticketsByKey,
+    stale_pr_after_days: stalePrAfterDays,
   };
 
   writeOutput('bundle.json', bundle);

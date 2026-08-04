@@ -8,6 +8,8 @@ function fakePr(overrides) {
     number: 4001,
     title: 'XQ-5003: Implement Neon theme',
     state: 'merged',
+    created_at: '2026-07-01T00:00:00Z',
+    merged_at: '2026-07-03T00:00:00Z',
     linked_ticket_id: 'XQ-5003',
     ai_contribution: { checklist_score_percent: 85, commit_ai_percent: 90 },
     ...overrides,
@@ -25,9 +27,18 @@ test('groups a single PR under its linked ticket key', () => {
     pr_url: 'https://github.com/bvs-xiangqi/xiangqi-client/pull/4001',
     pr_title: 'XQ-5003: Implement Neon theme',
     pr_state: 'merged',
+    pr_created_at: '2026-07-01T00:00:00Z',
+    pr_merged_at: '2026-07-03T00:00:00Z',
     pr_ai_checklist_percent: 85,
     pr_commit_co_author_percent: 90,
   });
+});
+
+test('keeps pr_created_at/pr_merged_at null-safe when missing', () => {
+  const index = buildTicketPrIndex([fakePr({ created_at: undefined, merged_at: undefined })]);
+  const evidence = index.get('XQ-5003')[0];
+  assert.equal(evidence.pr_created_at, null);
+  assert.equal(evidence.pr_merged_at, null);
 });
 
 test('groups multiple PRs across repos under the same ticket key', () => {

@@ -148,6 +148,127 @@
       '</div>';
   }
 
+  function renderReleaseProgress() {
+    var el = document.getElementById('release-progress');
+    var series = buildReleaseProgressSeries(getVisibleTickets());
+    var apChart = buildLineChart(
+      [{ name: 'Delivered AP', points: series.cumulative_ap_by_day }],
+      { referenceLine: { label: 'Planned SP', value: series.total_planned_sp }, ariaLabel: 'Cumulative AP delivered vs. planned SP' },
+    );
+    var completedChart = buildLineChart(
+      [{ name: 'Tickets completed', points: series.cumulative_tickets_completed_by_day }],
+      { ariaLabel: 'Cumulative tickets completed' },
+    );
+    el.innerHTML =
+      '<div class="two-col">' +
+      '<div class="card"><h3>Delivered AP vs. planned SP</h3>' + apChart + '</div>' +
+      '<div class="card"><h3>Tickets completed (cumulative)</h3>' + completedChart + '</div>' +
+      '</div>';
+  }
+
+  function renderTicketStatusBreakdown() {
+    var el = document.getElementById('ticket-status-breakdown');
+    var breakdown = computeTicketStatusBreakdown(getVisibleTickets());
+    var colorByCategory = { new: 'var(--text-muted)', indeterminate: 'var(--series-1)', done: 'var(--status-good)' };
+    el.innerHTML = buildStatusStackedBar(breakdown, colorByCategory);
+  }
+
+  function renderIssueTypeBreakdown() {
+    var el = document.getElementById('issue-type-breakdown');
+    var breakdown = computeIssueTypeBreakdown(getVisibleTickets());
+    var rows = breakdown
+      .map(function (b) {
+        return (
+          '<tr><td>' + escapeHtml(b.issue_type) + '</td><td>' + b.ticket_count + '</td><td>' +
+          fmtNum(b.planned_sp) + '</td><td>' + fmtNum(b.delivered_ap) + '</td></tr>'
+        );
+      })
+      .join('');
+    el.innerHTML =
+      '<table class="data-table"><thead><tr><th>Issue Type</th><th>Tickets</th><th>Planned SP</th><th>Delivered AP</th></tr></thead><tbody>' +
+      (rows || '<tr><td colspan="4" class="empty-state">No tickets in the selected release(s).</td></tr>') +
+      '</tbody></table>';
+  }
+
+  function renderEngineeringActivityTrend() {
+    var el = document.getElementById('engineering-activity-trend');
+    var trend = buildEngineeringActivityTrend(getVisibleTickets());
+    el.innerHTML = buildLineChart(
+      [
+        { name: 'PRs opened', points: trend.pr_opened_by_day },
+        { name: 'PRs merged', points: trend.pr_merged_by_day },
+        { name: 'Tickets → In Progress', points: trend.tickets_in_progress_by_day },
+        { name: 'Tickets completed', points: trend.tickets_completed_by_day },
+      ],
+      { ariaLabel: 'Engineering activity trend', height: 260 },
+    );
+  }
+
+  function renderPrActivityTrend() {
+    var el = document.getElementById('pr-activity-trend');
+    var trend = buildPrActivityTrend(getVisibleTickets(), null, DATA.stale_pr_after_days);
+    var chart = buildLineChart(
+      [
+        { name: 'PRs opened', points: trend.pr_opened_by_day },
+        { name: 'PRs merged', points: trend.pr_merged_by_day },
+      ],
+      { ariaLabel: 'PR activity trend' },
+    );
+
+    var staleRows = trend.stale_prs
+      .map(function (pr) {
+        return (
+          '<tr><td><a href="' + escapeHtml(pr.pr_url) + '" target="_blank" rel="noopener">' +
+          escapeHtml(pr.repo.split('/')[1]) + ' #' + pr.pr_number + '</a></td><td>' +
+          escapeHtml(pr.pr_title) + '</td><td>' + pr.days_open + '</td></tr>'
+        );
+      })
+      .join('');
+
+    el.innerHTML =
+      '<div class="kpi-row">' +
+      kpiTile('Total PRs', fmtNum(trend.total_prs)) +
+      kpiTile('Currently open', fmtNum(trend.currently_open_count)) +
+      kpiTile('Avg. open PR age', trend.average_open_pr_age_days == null ? '—' : fmtNum(trend.average_open_pr_age_days, 1) + 'd') +
+      kpiTile('Open > ' + trend.stale_pr_after_days + 'd', fmtNum(trend.stale_pr_count)) +
+      '</div>' +
+      chart +
+      (trend.stale_prs.length > 0
+        ? '<h3 class="subsection-title">PRs open longer than ' + trend.stale_pr_after_days + ' days</h3>' +
+          '<table class="data-table"><thead><tr><th>PR</th><th>Title</th><th>Days open</th></tr></thead><tbody>' +
+          staleRows +
+          '</tbody></table>'
+        : '');
+  }
+
+  function renderCycleTime() {
+    var el = document.getElementById('cycle-time');
+    var dist = buildCycleTimeDistribution(getVisibleTickets());
+    var agingRows = dist.aging_in_progress
+      .map(function (t) {
+        return (
+          '<tr><td>' + escapeHtml(t.key) + '</td><td>' + escapeHtml(t.summary) + '</td><td>' +
+          fmtNum(t.days_in_progress, 1) + '</td></tr>'
+        );
+      })
+      .join('');
+
+    el.innerHTML =
+      '<p class="caveat">Time from a ticket’s first move into &quot;In Progress&quot; to its first move into &quot;Code Review&quot;. A ticket created directly into In Progress (skipping that transition) won’t have a value here.</p>' +
+      '<div class="kpi-row">' +
+      kpiTile('Median', dist.median_hours == null ? '—' : fmtNum(dist.median_hours / 24, 1) + 'd') +
+      kpiTile('Mean', dist.mean_hours == null ? '—' : fmtNum(dist.mean_hours / 24, 1) + 'd') +
+      kpiTile('Coverage', dist.coverage + ' / ' + dist.total_tickets + ' tickets') +
+      '</div>' +
+      buildHistogramBars(dist.histogram) +
+      (dist.aging_in_progress.length > 0
+        ? '<h3 class="subsection-title">Currently aging in In Progress</h3>' +
+          '<table class="data-table"><thead><tr><th>Jira</th><th>Summary</th><th>Days in progress</th></tr></thead><tbody>' +
+          agingRows +
+          '</tbody></table>'
+        : '');
+  }
+
   function renderDeveloperDelivery() {
     var el = document.getElementById('developer-delivery');
     var rows = computeDeveloperDelivery(getVisibleTickets()).sort(function (a, b) {
@@ -258,11 +379,23 @@
       })
       .join('');
 
+    var timeline = buildDeveloperActivityTimeline(visible, state.selectedDeveloper);
+    var timelineChart = buildLineChart(
+      [
+        { name: 'Tickets completed', points: timeline.tickets_completed_by_day },
+        { name: 'PRs opened', points: timeline.pr_opened_by_day },
+        { name: 'PRs merged', points: timeline.pr_merged_by_day },
+      ],
+      { ariaLabel: 'Developer activity timeline', height: 200 },
+    );
+
     el.innerHTML =
       '<h3>' +
       escapeHtml(devRow.assignee_display_name) +
       '</h3>' +
       summaryHtml +
+      '<h4 class="timeline-label">Activity over time (personal — not a comparison against anyone else)</h4>' +
+      timelineChart +
       '<table class="data-table"><thead><tr><th>Jira</th><th>Summary</th><th>Status</th><th>SP</th><th>AP</th><th>AI Contribution</th><th>PR(s)</th></tr></thead><tbody>' +
       ticketRows +
       '</tbody></table>';
@@ -406,6 +539,12 @@
 
   function renderAll() {
     renderReleaseSummary();
+    renderReleaseProgress();
+    renderTicketStatusBreakdown();
+    renderIssueTypeBreakdown();
+    renderEngineeringActivityTrend();
+    renderPrActivityTrend();
+    renderCycleTime();
     renderDeveloperDelivery();
     renderDeveloperDetails();
     renderAllTickets();

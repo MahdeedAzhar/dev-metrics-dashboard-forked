@@ -94,3 +94,45 @@ function computeDeveloperDelivery(tickets) {
     percent_of_team_ap: teamAp > 0 ? (r.delivered_ap / teamAp) * 100 : null,
   }));
 }
+
+/**
+ * Current snapshot of ticket counts/% by status category (To Do / In Progress /
+ * Done). Purely a distribution — no judgment about whether the split is good.
+ */
+function computeTicketStatusBreakdown(tickets) {
+  const labels = { new: 'To Do', indeterminate: 'In Progress', done: 'Done' };
+  const counts = { new: 0, indeterminate: 0, done: 0 };
+
+  for (const ticket of tickets) {
+    if (ticket.status_category in counts) counts[ticket.status_category] += 1;
+  }
+
+  const total = tickets.length;
+  return Object.keys(labels).map((category) => ({
+    status_category: category,
+    label: labels[category],
+    count: counts[category],
+    percent: total > 0 ? (counts[category] / total) * 100 : null,
+  }));
+}
+
+/**
+ * Ticket count / planned SP / delivered AP faceted by issue type (Bug, Story,
+ * Task, etc.) — shows what kind of work made up the selection's delivery.
+ */
+function computeIssueTypeBreakdown(tickets) {
+  const byType = new Map();
+
+  for (const ticket of tickets) {
+    const type = ticket.issue_type ?? 'Unspecified';
+    if (!byType.has(type)) {
+      byType.set(type, { issue_type: type, ticket_count: 0, planned_sp: 0, delivered_ap: 0 });
+    }
+    const entry = byType.get(type);
+    entry.ticket_count += 1;
+    if (typeof ticket.sp === 'number') entry.planned_sp += ticket.sp;
+    if (typeof ticket.ap === 'number') entry.delivered_ap += ticket.ap;
+  }
+
+  return [...byType.values()].sort((a, b) => b.ticket_count - a.ticket_count);
+}

@@ -1,0 +1,172 @@
+// Pure inline-SVG chart builders. Plain JS, NO import/export — same reason as
+// deliveryMath.js/timeSeries.js (inlined verbatim into the dashboard's <script>
+// tag). Unlike picker.js this is NOT IIFE-wrapped: its functions stay on the
+// global scope on purpose, since picker.js calls into them directly, the same
+// relationship picker.js already has with deliveryMath.js/timeSeries.js.
+// Knows nothing about tickets/PRs/Jira — consumes only the plain data shapes
+// timeSeries.js/deliveryMath.js produce.
+
+// Categorical hues in FIXED order (never reassigned based on which series is
+// present, per the dataviz method) — matches this dashboard's existing
+// palette slots 1-4 (blue, orange, aqua, yellow), defined as CSS custom
+// properties in dashboard/render.js.
+const CHART_SERIES_COLORS = ['var(--series-1)', 'var(--series-2)', 'var(--series-3)', 'var(--series-4)'];
+
+function chartEscapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, (ch) =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch],
+  );
+}
+
+function chartFmtNum(value, digits) {
+  if (typeof value !== 'number' || Number.isNaN(value)) return '—';
+  return value.toLocaleString(undefined, { maximumFractionDigits: digits || 0 });
+}
+
+/**
+ * Multi-series line chart (up to 4 series, one axis — two measures of
+ * different scale get two separate charts, never a second y-axis). Each
+ * point carries a native <title> tooltip (hover detail without a custom
+ * crosshair implementation); only the last point of each line is
+ * direct-labeled (selective labeling, not a number on every point); a legend
+ * is always shown for 2+ series. `referenceLine` is an optional flat
+ * {label, value} dashed horizontal line (e.g. total planned SP).
+ */
+function buildLineChart(series, options) {
+  const opts = options || {};
+  const width = opts.width || 640;
+  const height = opts.height || 220;
+  const padding = { top: 16, right: 16, bottom: 28, left: 8 };
+  const plotWidth = width - padding.left - padding.right;
+  const plotHeight = height - padding.top - padding.bottom;
+
+  const nonEmptySeries = series.filter((s) => s.points && s.points.length > 0);
+  if (nonEmptySeries.length === 0) {
+    return '<p class="empty-state">No data in this window.</p>';
+  }
+
+  const pointCount = nonEmptySeries[0].points.length;
+  const allDates = nonEmptySeries[0].points.map((p) => p.date);
+  const allValues = nonEmptySeries.flatMap((s) => s.points.map((p) => p.value));
+  if (opts.referenceLine) allValues.push(opts.referenceLine.value);
+  const maxValue = Math.max(1, ...allValues);
+
+  const xAt = (i) => padding.left + (pointCount <= 1 ? plotWidth / 2 : (i / (pointCount - 1)) * plotWidth);
+  const yAt = (value) => padding.top + plotHeight - (value / maxValue) * plotHeight;
+
+  const gridLines = [0, 0.5, 1]
+    .map((frac) => {
+      const yPos = padding.top + plotHeight * (1 - frac);
+      return `<line x1="${padding.left}" y1="${yPos}" x2="${width - padding.right}" y2="${yPos}" class="chart-gridline" />`;
+    })
+    .join('');
+
+  const refLineSvg = opts.referenceLine
+    ? `<line x1="${padding.left}" y1="${yAt(opts.referenceLine.value).toFixed(1)}" x2="${width - padding.right}" y2="${yAt(opts.referenceLine.value).toFixed(1)}" class="chart-reference-line" />
+       <text x="${width - padding.right}" y="${(yAt(opts.referenceLine.value) - 4).toFixed(1)}" class="chart-axis-label" text-anchor="end">${chartEscapeHtml(opts.referenceLine.label)}: ${chartFmtNum(opts.referenceLine.value)}</text>`
+    : '';
+
+  const seriesSvg = nonEmptySeries
+    .map((s, seriesIndex) => {
+      const color = CHART_SERIES_COLORS[seriesIndex % CHART_SERIES_COLORS.length];
+      const pathD = s.points.map((p, i) => `${i === 0 ? 'M' : 'L'} ${xAt(i).toFixed(1)} ${yAt(p.value).toFixed(1)}`).join(' ');
+      const markers = s.points
+        .map(
+          (p, i) =>
+            `<circle cx="${xAt(i).toFixed(1)}" cy="${yAt(p.value).toFixed(1)}" r="2.5" fill="${color}"><title>${chartEscapeHtml(s.name)} — ${chartEscapeHtml(p.date)}: ${chartFmtNum(p.value)}</title></circle>`,
+        )
+        .join('');
+      const lastPoint = s.points[s.points.length - 1];
+      const lastX = xAt(s.points.length - 1);
+      const lastY = yAt(lastPoint.value);
+      return `
+        <path d="${pathD}" fill="none" stroke="${color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" />
+        ${markers}
+        <circle cx="${lastX.toFixed(1)}" cy="${lastY.toFixed(1)}" r="4" fill="var(--surface-1)" stroke="${color}" stroke-width="2" />
+        <text x="${Math.min(lastX + 6, width - padding.right - 4).toFixed(1)}" y="${(lastY - 6).toFixed(1)}" class="chart-series-label" fill="${color}" text-anchor="${lastX + 6 > width - padding.right - 60 ? 'end' : 'start'}">${chartEscapeHtml(s.name)}: ${chartFmtNum(lastPoint.value)}</text>
+      `;
+    })
+    .join('');
+
+  const xAxisLabels =
+    pointCount > 1
+      ? [0, pointCount - 1]
+          .map(
+            (i) =>
+              `<text x="${xAt(i).toFixed(1)}" y="${height - 6}" class="chart-axis-label" text-anchor="${i === 0 ? 'start' : 'end'}">${chartEscapeHtml(allDates[i])}</text>`,
+          )
+          .join('')
+      : `<text x="${xAt(0).toFixed(1)}" y="${height - 6}" class="chart-axis-label" text-anchor="middle">${chartEscapeHtml(allDates[0])}</text>`;
+
+  const legend =
+    nonEmptySeries.length > 1
+      ? `<div class="chart-legend">${nonEmptySeries
+          .map(
+            (s, i) =>
+              `<span class="chart-legend-item"><span class="chart-legend-swatch" style="background:${CHART_SERIES_COLORS[i % CHART_SERIES_COLORS.length]}"></span>${chartEscapeHtml(s.name)}</span>`,
+          )
+          .join('')}</div>`
+      : '';
+
+  return `
+    ${legend}
+    <svg viewBox="0 0 ${width} ${height}" width="100%" height="${height}" role="img" aria-label="${chartEscapeHtml(opts.ariaLabel || 'Line chart')}">
+      ${gridLines}
+      ${refLineSvg}
+      ${seriesSvg}
+      ${xAxisLabels}
+    </svg>
+  `;
+}
+
+/**
+ * 100%-stacked horizontal bar for a small fixed set of status categories
+ * (part-to-whole rides on the stacked bar per the dataviz method — donut
+ * stays deprioritized). `colorByCategory` maps status_category -> a CSS color
+ * (status semantics, e.g. Done -> the good/status-green token).
+ */
+function buildStatusStackedBar(breakdown, colorByCategory) {
+  const total = breakdown.reduce((sum, b) => sum + b.count, 0);
+  if (total === 0) {
+    return '<p class="empty-state">No tickets in the selected release(s).</p>';
+  }
+
+  const segments = breakdown
+    .filter((b) => b.count > 0)
+    .map((b) => {
+      const widthPct = (b.count / total) * 100;
+      const color = colorByCategory[b.status_category] || 'var(--text-muted)';
+      return `<div class="status-bar-segment" style="width:${widthPct}%;background:${color}"><title>${chartEscapeHtml(b.label)}: ${b.count} (${Math.round(b.percent)}%)</title></div>`;
+    })
+    .join('');
+
+  const legend = breakdown
+    .map((b) => {
+      const color = colorByCategory[b.status_category] || 'var(--text-muted)';
+      const pct = b.percent === null ? '—' : `${Math.round(b.percent)}%`;
+      return `<span class="chart-legend-item"><span class="chart-legend-swatch" style="background:${color}"></span>${chartEscapeHtml(b.label)}: ${b.count} (${pct})</span>`;
+    })
+    .join('');
+
+  return `<div class="status-bar">${segments}</div><div class="chart-legend">${legend}</div>`;
+}
+
+/**
+ * Single-hue horizontal bar histogram — a fixed-range distribution is a
+ * magnitude comparison across ordered buckets, not an identity comparison, so
+ * one hue is correct (see the dataviz method's sequential-vs-categorical rule).
+ */
+function buildHistogramBars(buckets) {
+  const max = Math.max(1, ...buckets.map((b) => b.count));
+  const rows = buckets
+    .map(
+      (b) => `
+      <div class="histogram-row">
+        <span class="histogram-label">${chartEscapeHtml(b.label)}</span>
+        <div class="histogram-track"><div class="histogram-fill" style="width:${(b.count / max) * 100}%"></div></div>
+        <span class="histogram-count">${b.count}</span>
+      </div>`,
+    )
+    .join('');
+  return `<div class="histogram">${rows}</div>`;
+}

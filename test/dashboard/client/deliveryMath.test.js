@@ -4,6 +4,8 @@ import {
   filterTicketsBySelectedReleases,
   computeReleaseSummary,
   computeDeveloperDelivery,
+  computeTicketStatusBreakdown,
+  computeIssueTypeBreakdown,
 } from '../../../src/dashboard/client/deliveryMathNode.js';
 
 function ticket(overrides) {
@@ -107,4 +109,48 @@ test('computeDeveloperDelivery groups unassigned tickets under a stable "unassig
   const rows = computeDeveloperDelivery(tickets);
   assert.equal(rows[0].assignee_account_id, 'unassigned');
   assert.equal(rows[0].assignee_display_name, 'Unassigned');
+});
+
+test('computeTicketStatusBreakdown counts and percentages by status category', () => {
+  const tickets = [
+    ticket({ status_category: 'done' }),
+    ticket({ status_category: 'done' }),
+    ticket({ status_category: 'indeterminate' }),
+    ticket({ status_category: 'new' }),
+  ];
+  const breakdown = computeTicketStatusBreakdown(tickets);
+  const done = breakdown.find((b) => b.status_category === 'done');
+  const inProgress = breakdown.find((b) => b.status_category === 'indeterminate');
+  const toDo = breakdown.find((b) => b.status_category === 'new');
+  assert.equal(done.count, 2);
+  assert.equal(done.percent, 50);
+  assert.equal(done.label, 'Done');
+  assert.equal(inProgress.count, 1);
+  assert.equal(toDo.count, 1);
+});
+
+test('computeTicketStatusBreakdown handles an empty ticket list without dividing by zero', () => {
+  const breakdown = computeTicketStatusBreakdown([]);
+  assert.ok(breakdown.every((b) => b.count === 0 && b.percent === null));
+});
+
+test('computeIssueTypeBreakdown facets ticket count, SP, and AP by issue type', () => {
+  const tickets = [
+    ticket({ issue_type: 'Bug', sp: 1, ap: 1 }),
+    ticket({ issue_type: 'Bug', sp: 2, ap: 1 }),
+    ticket({ issue_type: 'Story', sp: 5, ap: 3 }),
+  ];
+  const breakdown = computeIssueTypeBreakdown(tickets);
+  const bugs = breakdown.find((b) => b.issue_type === 'Bug');
+  const stories = breakdown.find((b) => b.issue_type === 'Story');
+  assert.equal(bugs.ticket_count, 2);
+  assert.equal(bugs.planned_sp, 3);
+  assert.equal(bugs.delivered_ap, 2);
+  assert.equal(stories.ticket_count, 1);
+});
+
+test('computeIssueTypeBreakdown labels a missing issue type as Unspecified instead of throwing', () => {
+  const tickets = [ticket({ issue_type: null })];
+  const breakdown = computeIssueTypeBreakdown(tickets);
+  assert.equal(breakdown[0].issue_type, 'Unspecified');
 });

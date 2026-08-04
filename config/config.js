@@ -24,3 +24,8 @@ export const releasesToTrack = ['8.5.0', '8.5.1 (Subscription)', '8.6.0'];
 export const jiraStoryPointsFieldId = 'customfield_10010'; // "Story Points" (SP)
 export const jiraActualPointsFieldId = 'customfield_10833'; // "Actual Points" (AP)
 export const jiraAiContributionFieldId = 'customfield_11729'; // "AI Contribution Percentage" — stored as a 0-1 fraction, must be ×100 for display
+
+// A currently-open PR older than this shows up in the PR Activity Trend's
+// team-level stale list. Purely descriptive — never attributed to or shown
+// against the developer who opened it.
+export const stalePrAfterDays = 14;

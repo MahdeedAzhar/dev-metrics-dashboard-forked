@@ -25,15 +25,18 @@ function escapeHtml(value) {
  * fetching/normalization (see src/index.js) but NO aggregation — aggregation
  * is relative to whatever release(s) are selected, which is a runtime browser
  * concern (dashboard/client/picker.js), recomputed on every selection change
- * via the shared dashboard/client/deliveryMath.js. This function's only job is
- * to embed the full {releases, tickets} dataset and inline those two client
- * scripts into a static HTML shell with four section containers.
+ * via the shared dashboard/client/deliveryMath.js + timeSeries.js. This
+ * function's only job is to embed the full {releases, tickets} dataset and
+ * inline those client scripts into a static HTML shell with the section
+ * containers.
  */
 export function renderDashboard(bundle) {
-  const { generated_at: generatedAt, releases, tickets } = bundle;
+  const { generated_at: generatedAt, releases, tickets, stale_pr_after_days: stalePrAfterDays } = bundle;
   const deliveryMathSource = readClientScript('deliveryMath.js');
+  const timeSeriesSource = readClientScript('timeSeries.js');
+  const chartsSource = readClientScript('charts.js');
   const pickerSource = readClientScript('picker.js');
-  const dataJson = JSON.stringify({ releases, tickets }).replace(/</g, '\\u003c');
+  const dataJson = JSON.stringify({ releases, tickets, stale_pr_after_days: stalePrAfterDays }).replace(/</g, '\\u003c');
 
   return `<!doctype html>
 <html lang="en">
@@ -51,10 +54,15 @@ export function renderDashboard(bundle) {
     --text-secondary: #52514e;
     --text-muted: #898781;
     --gridline: #e1e0d9;
+    --baseline: #c3c2b7;
     --border: rgba(11,11,11,0.10);
     --shadow: rgba(11,11,11,0.06);
     --series-1: #2a78d6;
     --series-1-track: #cde2fb;
+    --series-2: #eb6834;
+    --series-3: #1baf7a;
+    --series-4: #eda100;
+    --status-good: #0ca30c;
   }
   @media (prefers-color-scheme: dark) {
     :root:where(:not([data-theme="light"])) {
@@ -66,10 +74,15 @@ export function renderDashboard(bundle) {
       --text-secondary: #c3c2b7;
       --text-muted: #898781;
       --gridline: #2c2c2a;
+      --baseline: #383835;
       --border: rgba(255,255,255,0.10);
       --shadow: rgba(0,0,0,0.4);
       --series-1: #3987e5;
       --series-1-track: #184f95;
+      --series-2: #d95926;
+      --series-3: #199e70;
+      --series-4: #c98500;
+      --status-good: #0ca30c;
     }
   }
   :root[data-theme="dark"] {
@@ -81,10 +94,15 @@ export function renderDashboard(bundle) {
     --text-secondary: #c3c2b7;
     --text-muted: #898781;
     --gridline: #2c2c2a;
+    --baseline: #383835;
     --border: rgba(255,255,255,0.10);
     --shadow: rgba(0,0,0,0.4);
     --series-1: #3987e5;
     --series-1-track: #184f95;
+    --series-2: #d95926;
+    --series-3: #199e70;
+    --series-4: #c98500;
+    --status-good: #0ca30c;
   }
 
   * { box-sizing: border-box; }
@@ -99,7 +117,10 @@ export function renderDashboard(bundle) {
   h1 { font-size: 24px; font-weight: 650; margin: 0 0 6px; letter-spacing: -0.01em; }
   h2 { font-size: 16px; font-weight: 650; margin: 0 0 12px; }
   h3 { font-size: 16px; font-weight: 650; margin: 0 0 12px; }
+  .subsection-title { font-size: 13px; font-weight: 650; margin: 16px 0 8px; }
+  .timeline-label { font-size: 13px; font-weight: 600; color: var(--text-secondary); margin: 16px 0 8px; }
   .meta { color: var(--text-secondary); font-size: 13px; margin-bottom: 20px; }
+  .caveat { color: var(--text-muted); font-size: 12.5px; margin: -4px 0 16px; max-width: 76ch; line-height: 1.5; }
   .section { margin-bottom: 36px; }
   .card {
     background: var(--surface-1);
@@ -108,6 +129,8 @@ export function renderDashboard(bundle) {
     padding: 16px;
     box-shadow: 0 1px 2px var(--shadow);
   }
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 760px) { .two-col { grid-template-columns: 1fr; } }
   .kpi-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; }
   .kpi-tile .stat-label { display: block; color: var(--text-secondary); font-size: 12px; }
   .kpi-tile .stat-value { display: block; font-size: 26px; font-weight: 650; margin-top: 6px; letter-spacing: -0.01em; }
@@ -149,6 +172,25 @@ export function renderDashboard(bundle) {
   .data-table a { color: var(--series-1); text-decoration: none; }
   .data-table a:hover { text-decoration: underline; }
   .empty-state { color: var(--text-muted); font-size: 13px; }
+
+  /* Charts */
+  .chart-legend { display: flex; flex-wrap: wrap; gap: 14px; margin-bottom: 8px; font-size: 12px; color: var(--text-secondary); }
+  .chart-legend-item { display: inline-flex; align-items: center; gap: 6px; }
+  .chart-legend-swatch { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+  .chart-gridline { stroke: var(--gridline); stroke-width: 1; }
+  .chart-reference-line { stroke: var(--text-muted); stroke-width: 1.5; stroke-dasharray: 4 4; }
+  .chart-axis-label { fill: var(--text-muted); font-size: 11px; }
+  .chart-series-label { font-size: 11px; font-weight: 650; }
+
+  .status-bar { display: flex; height: 28px; border-radius: 6px; overflow: hidden; background: var(--gridline); margin-bottom: 10px; }
+  .status-bar-segment { height: 100%; }
+
+  .histogram { display: flex; flex-direction: column; gap: 8px; }
+  .histogram-row { display: grid; grid-template-columns: 56px 1fr 32px; align-items: center; gap: 8px; font-size: 12px; }
+  .histogram-label { color: var(--text-secondary); }
+  .histogram-track { height: 8px; border-radius: 4px; background: var(--series-1-track); overflow: hidden; }
+  .histogram-fill { height: 100%; background: var(--series-1); border-radius: 4px; }
+  .histogram-count { text-align: right; font-variant-numeric: tabular-nums; color: var(--text-secondary); }
 </style>
 </head>
 <body>
@@ -166,18 +208,51 @@ export function renderDashboard(bundle) {
   </div>
 
   <div class="section">
-    <h2>2. Developer Delivery</h2>
+    <h2>2. Release Progress Over Time</h2>
+    <p class="caveat">Cumulative delivery against the release's total planned SP — shows whether work is landing steadily or bunching up toward the end.</p>
+    <div id="release-progress"></div>
+  </div>
+
+  <div class="section two-col">
+    <div class="card">
+      <h2>3. Ticket Status Breakdown</h2>
+      <div id="ticket-status-breakdown"></div>
+    </div>
+    <div class="card">
+      <h2>4. Issue Type Breakdown</h2>
+      <div id="issue-type-breakdown"></div>
+    </div>
+  </div>
+
+  <div class="section">
+    <h2>5. Engineering Activity Trend</h2>
+    <p class="caveat">Descriptive only — whether the team was active throughout the release or activity was concentrated in bursts. Not an activity score.</p>
+    <div id="engineering-activity-trend"></div>
+  </div>
+
+  <div class="section">
+    <h2>6. PR Activity Trend</h2>
+    <div id="pr-activity-trend"></div>
+  </div>
+
+  <div class="section">
+    <h2>7. Delivery Flow: In Progress → Code Review</h2>
+    <div id="cycle-time"></div>
+  </div>
+
+  <div class="section">
+    <h2>8. Developer Delivery</h2>
     <p class="meta" style="margin-top:-6px;">Click a row to see that developer's tickets below. Delivered AP is the primary delivery metric; Planned SP is workload context.</p>
     <div id="developer-delivery"></div>
   </div>
 
   <div class="section">
-    <h2>3. Developer Details</h2>
+    <h2>9. Developer Details</h2>
     <div id="developer-details"></div>
   </div>
 
   <div class="section">
-    <h2>4. All Release Tickets</h2>
+    <h2>10. All Release Tickets</h2>
     <div id="all-tickets"></div>
   </div>
 </div>
@@ -186,6 +261,12 @@ export function renderDashboard(bundle) {
 </script>
 <script>
 ${deliveryMathSource}
+</script>
+<script>
+${timeSeriesSource}
+</script>
+<script>
+${chartsSource}
 </script>
 <script>
 ${pickerSource}
