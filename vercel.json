@@ -7,7 +7,7 @@
   "functions": {
     "api/dashboard.js": {
       "maxDuration": 300,
-      "includeFiles": ["src/dashboard/client/**"]
+      "includeFiles": "src/dashboard/client/**"
     },
     "api/bundle.js": { "maxDuration": 300 },
     "api/tickets/[issueKey].js": { "maxDuration": 300 },
