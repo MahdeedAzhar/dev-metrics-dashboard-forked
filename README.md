@@ -37,6 +37,30 @@ npm run live                              # run the live server
 DEFAULT_RELEASES="8.5.1 (Subscription),8.6.0" npm run live
 ```
 
+## Deploying to Vercel
+
+This repository includes Vercel serverless routes, so deploy the repository as
+an **Other** framework project — no build command or output directory is
+needed. Set these environment variables in the Vercel project settings:
+
+- `GITHUB_TOKEN`, `JIRA_BASE_URL`, `JIRA_EMAIL`, and `JIRA_API_TOKEN`
+- `DASHBOARD_USERNAME` and `DASHBOARD_PASSWORD` (required on Vercel; the site
+  uses HTTP Basic Auth to protect both the dashboard and Jira update API)
+- `CRON_SECRET` (a random secret used by Vercel Cron)
+- `BLOB_READ_WRITE_TOKEN` from a **private** Vercel Blob store connected to the
+  project
+- optional: `DEFAULT_RELEASES`
+
+The deployment serves the dashboard at `/`, accepts the existing
+`?releases=` query parameters, and retains inline Jira editing at
+`/api/tickets/:issueKey`. A protected Vercel Cron route refreshes the saved
+dashboard bundle daily; page loads serve the last successful snapshot
+immediately. The visible **Refresh dashboard** button and Jira edits refresh
+that same snapshot on demand. This schedule works on Vercel Hobby, whose Cron
+jobs are limited to daily runs. The low-level GitHub/Jira working cache remains
+a best-effort `/tmp` optimization, while the displayed dashboard snapshot is
+stored durably in private Blob storage.
+
 The live dashboard also supports choosing the startup release selection via URL query parameters:
 
 - Single release: `http://localhost:3000/?releases=8.6.0`

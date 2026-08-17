@@ -231,12 +231,21 @@ export function renderDashboard(bundle) {
   .histogram-track { height: 8px; border-radius: 4px; background: var(--series-1-track); overflow: hidden; }
   .histogram-fill { height: 100%; background: var(--series-1); border-radius: 4px; }
   .histogram-count { text-align: right; font-variant-numeric: tabular-nums; color: var(--text-secondary); }
+  .dashboard-actions { display: flex; align-items: center; gap: 10px; margin: -10px 0 20px; }
+  .refresh-button { font: inherit; font-size: 12px; font-weight: 650; padding: 7px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-1); color: var(--text-primary); cursor: pointer; }
+  .refresh-button:hover { background: var(--surface-2); }
+  .refresh-button:disabled { cursor: wait; opacity: 0.65; }
+  .refresh-status { color: var(--text-secondary); font-size: 12px; }
 </style>
 </head>
 <body>
 <div class="wrap">
   <h1>Engineering Delivery &amp; AI Insights Dashboard</h1>
   <p class="meta">Generated ${escapeHtml(generatedAt.slice(0, 16)).replace('T', ' ')} UTC · Select release(s) below — everything recalculates instantly, nothing here is a performance score.</p>
+  <div class="dashboard-actions">
+    <button id="dashboard-refresh" class="refresh-button" type="button">Refresh dashboard</button>
+    <span id="dashboard-refresh-status" class="refresh-status"></span>
+  </div>
 
   <div class="section">
     <div id="release-picker" class="release-picker"></div>

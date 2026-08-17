@@ -27,11 +27,12 @@ const fetchReleasesFromLastSixMonths = async () => {
   }
 
   const authHeader = Buffer.from(`${email}:${token}`).toString('base64');
+  const jiraBaseUrl = (process.env.JIRA_BASE_URL || 'https://arbisoft.atlassian.net').replace(/\/$/, '');
 
   try {
     // Note: Use /versions (plural) for fetching all project versions
     const response = await fetch(
-      'https://arbisoft.atlassian.net/rest/api/3/project/XQ/versions',
+      `${jiraBaseUrl}/rest/api/3/project/XQ/versions`,
       {
         headers: {
           Authorization: `Basic ${authHeader}`,

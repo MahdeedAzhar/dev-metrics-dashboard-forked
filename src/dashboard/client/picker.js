@@ -822,6 +822,35 @@
     renderAllTickets();
   }
 
+  function bindDashboardRefresh() {
+    var button = document.getElementById('dashboard-refresh');
+    var status = document.getElementById('dashboard-refresh-status');
+    if (!button) return;
+
+    button.addEventListener('click', function () {
+      button.disabled = true;
+      button.textContent = 'Refreshing…';
+      if (status) status.textContent = 'Fetching Jira and GitHub data…';
+
+      fetch('/api/refresh', { credentials: 'same-origin' })
+        .then(function (response) {
+          return response.json().then(function (payload) {
+            if (!response.ok || !payload.ok) throw new Error(payload.error || 'Unable to refresh the dashboard.');
+            return payload;
+          });
+        })
+        .then(function () {
+          window.location.reload();
+        })
+        .catch(function (error) {
+          button.disabled = false;
+          button.textContent = 'Refresh dashboard';
+          if (status) status.textContent = error.message;
+        });
+    });
+  }
+
   renderReleasePicker();
   renderAll();
+  bindDashboardRefresh();
 })();
