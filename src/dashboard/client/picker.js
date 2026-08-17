@@ -47,6 +47,7 @@
     selectedDeveloper: null,
     selectedRepoOpenPrs: [],
     selectedRepoName: '',
+    releaseComparisonDeveloper: '',
     ticketFilters: { status: '', issueType: '', developer: '' },
     sortState: { column: null, direction: 'desc' },
   };
@@ -382,6 +383,26 @@
       '<div class="card"><h3>Delivered AP vs. planned SP</h3>' + apChart + '</div>' +
       '<div class="card"><h3>Tickets completed (cumulative)</h3>' + completedChart + '</div>' +
       '</div>';
+  }
+
+  function renderReleasePointComparison() {
+    var el = document.getElementById('release-point-comparison');
+    var releaseNames = DATA.releases
+      .map(function (release) { return release.name; })
+      .filter(function (name) { return state.selectedReleases.has(name); });
+    var developers = uniqueDevelopers(getVisibleTickets());
+    var developerOptions = '<option value="">All developers</option>' + developers.map(function (pair) {
+      return '<option value="' + escapeHtml(pair[0]) + '"' + (pair[0] === state.releaseComparisonDeveloper ? ' selected' : '') + '>' + escapeHtml(pair[1]) + '</option>';
+    }).join('');
+    var rows = computeReleasePointComparison(getVisibleTickets(), releaseNames, state.releaseComparisonDeveloper);
+
+    el.innerHTML =
+      '<div class="ticket-filters"><label class="filter-label">Developer<select id="release-comparison-developer">' + developerOptions + '</select></label></div>' +
+      buildReleasePointComparisonChart(rows);
+    el.querySelector('#release-comparison-developer').addEventListener('change', function (event) {
+      state.releaseComparisonDeveloper = event.target.value;
+      renderReleasePointComparison();
+    });
   }
 
   function renderTicketStatusBreakdown() {
@@ -811,6 +832,7 @@
 
   function renderAll() {
     renderReleaseSummary();
+    renderReleasePointComparison();
     renderReleaseProgress();
     renderTicketStatusBreakdown();
     renderIssueTypeBreakdown();

@@ -257,51 +257,57 @@ export function renderDashboard(bundle) {
   </div>
 
   <div class="section">
-    <h2>2. Release Progress Over Time</h2>
+    <h2>2. Story Points vs. Actual Points by Release</h2>
+    <p class="caveat">Compare planned and delivered points across the selected releases. Use the developer selector to view the whole team or one developer.</p>
+    <div id="release-point-comparison" class="card"></div>
+  </div>
+
+  <div class="section">
+    <h2>3. Release Progress Over Time</h2>
     <p class="caveat">Cumulative delivery against the release's total planned SP — shows whether work is landing steadily or bunching up toward the end.</p>
     <div id="release-progress"></div>
   </div>
 
   <div class="section two-col">
     <div class="card">
-      <h2>3. Ticket Status Breakdown</h2>
+      <h2>4. Ticket Status Breakdown</h2>
       <div id="ticket-status-breakdown"></div>
     </div>
     <div class="card">
-      <h2>4. Issue Type Breakdown</h2>
+      <h2>5. Issue Type Breakdown</h2>
       <div id="issue-type-breakdown"></div>
     </div>
   </div>
 
   <div class="section">
-    <h2>5. Engineering Activity Trend</h2>
+    <h2>6. Engineering Activity Trend</h2>
     <p class="caveat">Descriptive only — whether the team was active throughout the release or activity was concentrated in bursts. Not an activity score.</p>
     <div id="engineering-activity-trend"></div>
   </div>
 
   <div class="section">
-    <h2>6. PR Activity Trend</h2>
+    <h2>7. PR Activity Trend</h2>
     <div id="pr-activity-trend"></div>
   </div>
 
   <div class="section">
-    <h2>7. Delivery Flow: In Progress → Code Review</h2>
+    <h2>8. Delivery Flow: In Progress → Code Review</h2>
     <div id="cycle-time"></div>
   </div>
 
   <div class="section">
-    <h2>8. Developer Delivery</h2>
+    <h2>9. Developer Delivery</h2>
     <p class="meta" style="margin-top:-6px;">Click a row to see that developer's tickets below. Delivered AP is the primary delivery metric; Planned SP is workload context.</p>
     <div id="developer-delivery"></div>
   </div>
 
   <div class="section">
-    <h2>9. Developer Details</h2>
+    <h2>10. Developer Details</h2>
     <div id="developer-details"></div>
   </div>
 
   <div class="section">
-    <h2>10. All Release Tickets</h2>
+    <h2>11. All Release Tickets</h2>
     <div id="all-tickets"></div>
   </div>
 </div>
