@@ -123,29 +123,43 @@ function buildLineChart(series, options) {
 function buildReleasePointComparisonChart(rows) {
   if (!rows.length) return '<p class="empty-state">No releases selected.</p>';
   const width = Math.max(640, rows.length * 84);
-  const height = 280;
-  const padding = { top: 18, right: 16, bottom: 72, left: 12 };
+  const height = 320; // Increased slightly for generous label space
+  const padding = { top: 24, right: 20, bottom: 100, left: 40 };
   const plotWidth = width - padding.left - padding.right;
   const plotHeight = height - padding.top - padding.bottom;
-  const maxValue = Math.max(1, ...rows.flatMap((row) => [row.planned_sp, row.delivered_ap]));
+  const maxValue = Math.max(1, ...rows.flatMap((row) => [row.planned_sp || 0, row.delivered_ap || 0]));
   const groupWidth = plotWidth / rows.length;
   const barWidth = Math.max(6, Math.min(22, groupWidth * 0.32));
-  const yAt = (value) => padding.top + plotHeight - (value / maxValue) * plotHeight;
+  const yAt = (value) => padding.top + plotHeight - ((value || 0) / maxValue) * plotHeight;
 
   const gridLines = [0, 0.5, 1].map((fraction) => {
     const y = padding.top + plotHeight * (1 - fraction);
-    return `<line x1="${padding.left}" y1="${y}" x2="${width - padding.right}" y2="${y}" class="chart-gridline" />`;
+    const val = chartFmtNum(maxValue * fraction);
+    return `
+      <line x1="${padding.left}" y1="${y}" x2="${width - padding.right}" y2="${y}" class="chart-gridline" />
+      <text x="${padding.left - 6}" y="${y + 4}" class="chart-axis-label" text-anchor="end">${val}</text>
+    `;
   }).join('');
+
+  const labelY = padding.top + plotHeight + 14; // Position labels just below the bottom axis line
 
   const bars = rows.map((row, index) => {
     const center = padding.left + groupWidth * index + groupWidth / 2;
-    const plannedY = yAt(row.planned_sp);
-    const actualY = yAt(row.delivered_ap);
-    const label = row.release_name.length > 13 ? `${row.release_name.slice(0, 12)}…` : row.release_name;
+    const plannedVal = row.planned_sp || 0;
+    const actualVal = row.delivered_ap || 0;
+    const plannedY = yAt(plannedVal);
+    const actualY = yAt(actualVal);
+    const fullLabel = row.release_name;
+
     return `
-      <rect x="${(center - barWidth - 2).toFixed(1)}" y="${plannedY.toFixed(1)}" width="${barWidth}" height="${(padding.top + plotHeight - plannedY).toFixed(1)}" fill="var(--series-1)"><title>${chartEscapeHtml(row.release_name)} — Planned SP: ${chartFmtNum(row.planned_sp)}</title></rect>
-      <rect x="${(center + 2).toFixed(1)}" y="${actualY.toFixed(1)}" width="${barWidth}" height="${(padding.top + plotHeight - actualY).toFixed(1)}" fill="var(--series-2)"><title>${chartEscapeHtml(row.release_name)} — Delivered AP: ${chartFmtNum(row.delivered_ap)}</title></rect>
-      <text x="${center.toFixed(1)}" y="${height - 8}" class="chart-axis-label" text-anchor="end" transform="rotate(-38 ${center.toFixed(1)} ${height - 8})">${chartEscapeHtml(label)}</text>`;
+      <rect x="${(center - barWidth - 2).toFixed(1)}" y="${plannedY.toFixed(1)}" width="${barWidth}" height="${(padding.top + plotHeight - plannedY).toFixed(1)}" fill="var(--series-1)"><title>${chartEscapeHtml(fullLabel)} — Planned SP: ${chartFmtNum(plannedVal)}</title></rect>
+      ${plannedVal > 0 ? `<text x="${(center - barWidth / 2 - 2).toFixed(1)}" y="${(plannedY - 4).toFixed(1)}" class="chart-axis-label" text-anchor="middle" font-size="10">${chartFmtNum(plannedVal)}</text>` : ''}
+      
+      <rect x="${(center + 2).toFixed(1)}" y="${actualY.toFixed(1)}" width="${barWidth}" height="${(padding.top + plotHeight - actualY).toFixed(1)}" fill="var(--series-2)"><title>${chartEscapeHtml(fullLabel)} — Delivered AP: ${chartFmtNum(actualVal)}</title></rect>
+      ${actualVal > 0 ? `<text x="${(center + 2 + barWidth / 2).toFixed(1)}" y="${(actualY - 4).toFixed(1)}" class="chart-axis-label" text-anchor="middle" font-size="10">${chartFmtNum(actualVal)}</text>` : ''}
+
+      <text x="${center.toFixed(1)}" y="${labelY.toFixed(1)}" class="chart-axis-label" text-anchor="end" transform="rotate(-40 ${center.toFixed(1)} ${labelY.toFixed(1)})">${chartEscapeHtml(fullLabel)}</text>
+    `;
   }).join('');
 
   return `
@@ -178,7 +192,7 @@ function buildStatusStackedBar(breakdown, colorByCategory) {
     .map((b) => {
       const color = colorByCategory[b.status_category] || 'var(--text-muted)';
       const pct = b.percent === null ? '—' : `${Math.round(b.percent)}%`;
-      return `<span class="chart-legend-item"><span class="chart-legend-swatch" style="background:${color}"></span>${chartEscapeHtml(b.label)}: ${b.count} (${pct})</span>`;
+      return `<span class="chart-legend-item"><span class="chart-legend-swatch" style="background:${color}"></span>${chartEscapeHtml(b.label)}: ${chartFmtNum(b.count)} (${pct})</span>`;
     })
     .join('');
 
@@ -198,7 +212,7 @@ function buildHistogramBars(buckets) {
       <div class="histogram-row">
         <span class="histogram-label">${chartEscapeHtml(b.label)}</span>
         <div class="histogram-track"><div class="histogram-fill" style="width:${(b.count / max) * 100}%"></div></div>
-        <span class="histogram-count">${b.count}</span>
+        <span class="histogram-count">${chartFmtNum(b.count)}</span>
       </div>`,
     )
     .join('');
