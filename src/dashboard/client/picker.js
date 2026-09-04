@@ -299,6 +299,13 @@
     }
     return ticket.linked_prs
       .map(function (pr) {
+        var reviewInfo = '';
+        if (pr.pr_reviewers && pr.pr_reviewers.length > 0) {
+          reviewInfo = ' [' + pr.pr_reviewers.join(', ') + ']';
+        }
+        var reviewTime = pr.pr_review_completion_time_hours !== null 
+          ? ' (' + fmtNum(pr.pr_review_completion_time_hours, 1) + 'h)'
+          : '';
         return (
           '<a href="' +
           escapeHtml(pr.pr_url) +
@@ -308,10 +315,87 @@
           pr.pr_number +
           '</a> (' +
           escapeHtml(pr.pr_state) +
-          ')'
+          ')' +
+          reviewInfo +
+          reviewTime
         );
       })
       .join('<br>');
+  }
+
+  function codeReviewersHtml(ticket) {
+    if (!ticket.linked_prs || ticket.linked_prs.length === 0) {
+      return '<span class="empty-state">No reviews</span>';
+    }
+    var allReviewers = new Set();
+    ticket.linked_prs.forEach(function (pr) {
+      if (pr.pr_reviewers && Array.isArray(pr.pr_reviewers)) {
+        pr.pr_reviewers.forEach(function (reviewer) {
+          allReviewers.add(reviewer);
+        });
+      }
+    });
+    if (allReviewers.size === 0) {
+      return '<span class="empty-state">No reviewers</span>';
+    }
+    return Array.from(allReviewers).join(', ');
+  }
+
+  function buildCodeReviewMetrics(tickets) {
+    var allReviewTimings = [];
+    var allCompletionTimings = [];
+    var allReviewerNames = new Set();
+    var totalPrsWithReview = 0;
+    var prReviewDetails = [];
+
+    tickets.forEach(function (ticket) {
+      if (!ticket.linked_prs) return;
+      ticket.linked_prs.forEach(function (pr) {
+        // Add to review details if it has reviewers OR review timing data
+        if ((pr.pr_reviewers && pr.pr_reviewers.length > 0) || pr.pr_review_completion_time_hours !== null) {
+          prReviewDetails.push({
+            repo: pr.repo.split('/')[1],
+            pr_number: pr.pr_number,
+            pr_url: pr.pr_url,
+            completion_time: pr.pr_review_completion_time_hours,
+            first_review_time: pr.pr_time_to_first_review_hours,
+            state: pr.pr_state,
+            reviewers: pr.pr_reviewers || [],
+          });
+        }
+        
+        if (pr.pr_reviewers && pr.pr_reviewers.length > 0) {
+          totalPrsWithReview++;
+          pr.pr_reviewers.forEach(function (reviewer) {
+            allReviewerNames.add(reviewer);
+          });
+        }
+        if (pr.pr_time_to_first_review_hours !== null) {
+          allReviewTimings.push(pr.pr_time_to_first_review_hours);
+        }
+        if (pr.pr_review_completion_time_hours !== null) {
+          allCompletionTimings.push(pr.pr_review_completion_time_hours);
+        }
+      });
+    });
+
+    var avgReviewTime = allReviewTimings.length > 0
+      ? allReviewTimings.reduce(function (a, b) { return a + b; }, 0) / allReviewTimings.length
+      : null;
+
+    var avgCompletionTime = allCompletionTimings.length > 0
+      ? allCompletionTimings.reduce(function (a, b) { return a + b; }, 0) / allCompletionTimings.length
+      : null;
+
+    return {
+      avg_review_time_hours: avgReviewTime,
+      avg_completion_time_hours: avgCompletionTime,
+      prs_with_review: totalPrsWithReview,
+      unique_reviewers: Array.from(allReviewerNames).sort(),
+      pr_details: prReviewDetails.sort(function (a, b) {
+        return b.completion_time - a.completion_time; // Sort by completion time descending
+      }),
+    };
   }
 
   function renderReleasePicker() {
@@ -482,13 +566,19 @@
     if (state.selectedRepoOpenPrs && state.selectedRepoOpenPrs.length > 0) {
       openPrDetailsHtml =
         '<h3 class="subsection-title">Open PRs for ' + escapeHtml(state.selectedRepoName) + '</h3>' +
-        '<table class="data-table"><thead><tr><th>PR</th><th>Title</th><th>Age</th></tr></thead><tbody>' +
+        '<table class="data-table"><thead><tr><th>PR</th><th>Title</th><th>Assignee</th><th>Reviewers</th><th>Age</th></tr></thead><tbody>' +
         state.selectedRepoOpenPrs
           .map(function (pr) {
+            var assigneeHtml = pr.assignee_login
+              ? escapeHtml(pr.assignee_login)
+              : '<span class="empty-state">Unassigned</span>';
+            var reviewersHtml = pr.reviewers && pr.reviewers.length > 0
+              ? escapeHtml(pr.reviewers.join(', '))
+              : '<span class="empty-state">No reviewers</span>';
             return (
               '<tr><td><a href="' + escapeHtml(pr.pr_url) + '" target="_blank" rel="noopener">' +
               escapeHtml(pr.repo.split('/')[1]) + ' #' + pr.pr_number + '</a></td><td>' +
-              escapeHtml(pr.pr_title) + '</td><td>' + fmtNum(pr.days_open) + 'd</td></tr>'
+              escapeHtml(pr.pr_title) + '</td><td>' + assigneeHtml + '</td><td>' + reviewersHtml + '</td><td>' + fmtNum(pr.days_open) + 'd</td></tr>'
             );
           })
           .join('') +
@@ -526,6 +616,8 @@
               pr_title: pr.pr_title,
               pr_number: pr.pr_number,
               repo: pr.repo,
+              assignee_login: pr.pr_assignee_login || null,
+              reviewers: pr.pr_reviewers || [],
               days_open: Math.round((new Date().getTime() - new Date(pr.pr_created_at).getTime()) / (1000 * 60 * 60 * 24)),
             };
           });
@@ -537,6 +629,48 @@
         renderPrActivityTrend();
       });
     });
+  }
+
+  function renderCodeReviewMetrics() {
+    var el = document.getElementById('code-review-metrics');
+    var metrics = buildCodeReviewMetrics(getVisibleTickets());
+    
+    var reviewersList = metrics.unique_reviewers.length > 0
+      ? '<ul>' + metrics.unique_reviewers.map(function (r) { return '<li>' + escapeHtml(r) + '</li>'; }).join('') + '</ul>'
+      : '<p class="empty-state">No reviewers found</p>';
+
+    var prDetailsRows = metrics.pr_details.length > 0
+      ? metrics.pr_details
+          .map(function (pr) {
+            var reviewDuration = pr.completion_time !== null 
+              ? fmtNum(pr.completion_time, 1) + 'h'
+              : (pr.first_review_time !== null ? fmtNum(pr.first_review_time, 1) + 'h (first review)' : '—');
+            return (
+              '<tr><td><a href="' + escapeHtml(pr.pr_url) + '" target="_blank" rel="noopener">' +
+              escapeHtml(pr.repo) + ' #' + pr.pr_number + '</a></td><td>' +
+              escapeHtml(pr.reviewers.join(', ') || 'N/A') + '</td><td>' +
+              reviewDuration + '</td><td>' +
+              escapeHtml(pr.state) + '</td></tr>'
+            );
+          })
+          .join('')
+      : '<tr><td colspan="4" class="empty-state">No PRs with review data available.</td></tr>';
+
+    var content =
+      '<div class="kpi-row">' +
+      kpiTile('Avg. time to first review', metrics.avg_review_time_hours === null ? '—' : fmtNum(metrics.avg_review_time_hours, 1) + 'h') +
+      kpiTile('Avg. time to review completion', metrics.avg_completion_time_hours === null ? '—' : fmtNum(metrics.avg_completion_time_hours, 1) + 'h') +
+      kpiTile('PRs with reviews', fmtNum(metrics.prs_with_review)) +
+      kpiTile('Unique reviewers', fmtNum(metrics.unique_reviewers.length)) +
+      '</div>' +
+      '<h3 class="subsection-title">Code reviewers</h3>' +
+      reviewersList +
+      '<h3 class="subsection-title">PR Review Duration by State</h3>' +
+      '<table class="data-table"><thead><tr><th>PR</th><th>Reviewers</th><th>Review Duration</th><th>State</th></tr></thead><tbody>' +
+      prDetailsRows +
+      '</tbody></table>';
+
+    el.innerHTML = content;
   }
 
   function renderCycleTime() {
@@ -769,7 +903,7 @@
       sortHeader('sp', 'SP') +
       sortHeader('ap', 'AP') +
       sortHeader('ai_contribution_percent', 'AI Contribution') +
-      '<th>PR(s)</th></tr>';
+      '<th>PR(s)</th><th>Code Reviewers</th></tr>';
 
     var body = tickets
       .map(function (t) {
@@ -788,6 +922,7 @@
           renderEditableCell(t, 'ap') +
           renderEditableCell(t, 'ai_contribution_percent') +
           '<td>' + prLinksHtml(t) + '</td>' +
+          '<td>' + codeReviewersHtml(t) + '</td>' +
           '</tr>'
         );
       })
@@ -798,7 +933,7 @@
       '<table class="data-table" id="all-tickets-table"><thead>' +
       head +
       '</thead><tbody>' +
-      (body || '<tr><td colspan="9" class="empty-state">No tickets match the current filters.</td></tr>') +
+      (body || '<tr><td colspan="10" class="empty-state">No tickets match the current filters.</td></tr>') +
       '</tbody></table>';
 
     el.querySelector('#filter-status').addEventListener('change', function (e) {
@@ -838,6 +973,7 @@
     renderIssueTypeBreakdown();
     renderEngineeringActivityTrend();
     renderPrActivityTrend();
+    renderCodeReviewMetrics();
     renderCycleTime();
     renderDeveloperDelivery();
     renderDeveloperDetails();

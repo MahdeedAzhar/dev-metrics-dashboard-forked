@@ -291,23 +291,29 @@ export function renderDashboard(bundle) {
   </div>
 
   <div class="section">
-    <h2>8. Delivery Flow: In Progress → Code Review</h2>
+    <h2>8. Code Review Metrics</h2>
+    <p class="caveat">Time from PR creation to first review/approval and reviewer breakdown. Shows efficiency of code review process.</p>
+    <div id="code-review-metrics"></div>
+  </div>
+
+  <div class="section">
+    <h2>9. Delivery Flow: In Progress → Code Review</h2>
     <div id="cycle-time"></div>
   </div>
 
   <div class="section">
-    <h2>9. Developer Delivery</h2>
+    <h2>10. Developer Delivery</h2>
     <p class="meta" style="margin-top:-6px;">Click a row to see that developer's tickets below. Delivered AP is the primary delivery metric; Planned SP is workload context.</p>
     <div id="developer-delivery"></div>
   </div>
 
   <div class="section">
-    <h2>10. Developer Details</h2>
+    <h2>11. Developer Details</h2>
     <div id="developer-details"></div>
   </div>
 
   <div class="section">
-    <h2>11. All Release Tickets</h2>
+    <h2>12. All Release Tickets</h2>
     <div id="all-tickets"></div>
   </div>
 </div>
