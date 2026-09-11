@@ -1206,17 +1206,16 @@
     if (!button) return;
 
     button.addEventListener('click', function () {
+      var controller = new AbortController();
       var refreshTimeout = window.setTimeout(function () {
-        button.disabled = false;
-        button.textContent = 'Refresh dashboard';
-        if (status) status.textContent = 'Refresh timed out. Please try again.';
+        controller.abort();
       }, 120000);
 
       button.disabled = true;
       button.textContent = 'Refreshing…';
       if (status) status.textContent = 'Fetching Jira and GitHub data…';
 
-      fetch('/api/refresh', { credentials: 'same-origin' })
+      fetch('/api/refresh', { credentials: 'same-origin', signal: controller.signal })
         .then(function (response) {
           return response.json().then(function (payload) {
             if (!response.ok || !payload.ok) throw new Error(payload.error || 'Unable to refresh the dashboard.');
@@ -1231,7 +1230,9 @@
           window.clearTimeout(refreshTimeout);
           button.disabled = false;
           button.textContent = 'Refresh dashboard';
-          if (status) status.textContent = error.message;
+          if (status) status.textContent = error.name === 'AbortError'
+            ? 'Refresh timed out. Please try again.'
+            : error.message;
         });
     });
   }
