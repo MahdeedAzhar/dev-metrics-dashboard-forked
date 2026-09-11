@@ -10,6 +10,8 @@ const FALLBACK_MODELS = [
   'meta-llama/llama-4-maverick-17b-128e-instruct',
   'qwen/qwen3-32b',
 ];
+/** Models that exist on providers but cannot serve chat completions (e.g. TTS like canopylabs/orpheus-arabic-saudi). */
+const NON_CHAT_MODEL_PATTERN = /whisper|guard|tts|orpheus|embed|distil-/i;
 let modelCandidates = null; // { baseUrl, names: [] } ordered list of usable models
 let lastSelectedModel = null;
 const EDITABLE_FIELDS = new Set([
@@ -519,6 +521,12 @@ function isRateLimitError(error) {
   return false;
 }
 
+/** True when the selected model cannot serve chat completions (e.g. a TTS model). */
+function isUnsupportedModelError(error) {
+  if (error instanceof Error && /does not support chat completions|not supported for chat/i.test(error.message)) return true;
+  return false;
+}
+
 /** Best-effort wait (seconds) suggested by the provider for a 429; bounded. */
 function rateLimitWaitSeconds(error) {
   const match = String(error?.message || '').match(/try again in ([\d.]+)s?/i);
@@ -542,11 +550,13 @@ async function getModelCandidates(baseUrl, apiKey) {
     if (response.ok) {
       const records = (await response.json()).data ?? [];
       const known = new Set(records.map((record) => record.id));
-      const ordered = [configuredModel, ...FALLBACK_MODELS].filter((name) => known.has(name));
-      const anythingElse = records
-        .filter((record) => !record.id.includes('whisper') && !record.id.includes('guard'))
-        .map((record) => record.id);
-      names = [...new Set([...ordered, ...anythingElse])].slice(0, 12);
+      // Only ever use models known to support chat completions. Never promote
+      // arbitrary discovered models — providers list TTS/ASR/moderation models
+      // (e.g. canopylabs/orpheus-arabic-saudi) that reject chat requests.
+      const chatCapable = names.filter(
+        (name) => known.has(name) && !NON_CHAT_MODEL_PATTERN.test(name),
+      );
+      if (chatCapable.length) names = chatCapable;
     }
   } catch {
     // keep the static list
@@ -611,13 +621,18 @@ export async function answerAssistantQuestion(bundle, messages) {
       try {
         return await callModel(messages, model);
       } catch (error) {
-        if (!isRateLimitError(error)) throw error;
-        const wait = rateLimitWaitSeconds(error) * 1000;
-        await sleep(attempt === 0 ? Math.min(wait, 2500) : wait);
+        const unsupportedModel = isUnsupportedModelError(error);
+        if (!isRateLimitError(error) && !unsupportedModel) throw error;
+        if (!unsupportedModel) {
+          const wait = rateLimitWaitSeconds(error) * 1000;
+          await sleep(attempt === 0 ? Math.min(wait, 2500) : wait);
+        }
         usedModels.add(model);
         const next = pickModel(candidates, usedModels);
         if (!next) {
-          throw new Error('The AI provider is rate-limited on every available free model right now. Please wait a few seconds and ask again.');
+          throw new Error(unsupportedModel
+            ? 'No chat-capable AI model is available for the configured provider. Check the AI_MODEL and AI_BASE_URL settings.'
+            : 'The AI provider is rate-limited on every available free model right now. Please wait a few seconds and ask again.');
         }
         model = next;
         lastSelectedModel = next;
