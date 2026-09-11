@@ -186,6 +186,24 @@ async function bootstrap() {
       return;
     }
 
+    if (req.method === 'GET' && req.url === '/api/refresh') {
+      try {
+        const bundle = await refreshData();
+        if (!bundle) {
+          res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+          res.end(JSON.stringify({ ok: false, error: 'Dashboard refresh failed. Check server logs.' }));
+          return;
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+        res.end(JSON.stringify({ ok: true, generatedAt: bundle.generated_at }));
+      } catch (error) {
+        warn(`Dashboard refresh failed: ${error.message}`);
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+        res.end(JSON.stringify({ ok: false, error: error.message }));
+      }
+      return;
+    }
+
     const [pathOnly, queryString] = req.url.split('?');
     if (pathOnly === '/' && queryString) {
       const params = new URLSearchParams(queryString);

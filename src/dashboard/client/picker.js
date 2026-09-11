@@ -1206,6 +1206,12 @@
     if (!button) return;
 
     button.addEventListener('click', function () {
+      var refreshTimeout = window.setTimeout(function () {
+        button.disabled = false;
+        button.textContent = 'Refresh dashboard';
+        if (status) status.textContent = 'Refresh timed out. Please try again.';
+      }, 120000);
+
       button.disabled = true;
       button.textContent = 'Refreshing…';
       if (status) status.textContent = 'Fetching Jira and GitHub data…';
@@ -1218,9 +1224,11 @@
           });
         })
         .then(function () {
+          window.clearTimeout(refreshTimeout);
           window.location.reload();
         })
         .catch(function (error) {
+          window.clearTimeout(refreshTimeout);
           button.disabled = false;
           button.textContent = 'Refresh dashboard';
           if (status) status.textContent = error.message;
