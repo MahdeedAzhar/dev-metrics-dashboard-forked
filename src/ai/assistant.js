@@ -3,15 +3,25 @@ import { updateJiraIssueField, postJiraComment } from '../fetch/jira.js';
 
 const DEFAULT_AI_BASE_URL = 'https://api.groq.com/openai/v1';
 const MAX_TOOL_ROUNDS = 8;
+/** Preferred chat-completion models, ordered. All of these support tool
+ * calling (verified against the Groq API) — required by the assistant loop.
+ * Groq retires models over time, so discovery drops whatever no longer exists.
+ * Note: Groq's developer plan bills per token (no zero-cost tier left), but
+ * gpt-oss-20b/120b cost ~$0.075-$0.60 per 1M tokens — fractions of a cent per
+ * assistant query. */
 const FALLBACK_MODELS = [
-  'llama-3.1-8b-instant',
+  'openai/gpt-oss-120b',
+  'openai/gpt-oss-20b',
+  'qwen/qwen3.6-27b',
+  'qwen/qwen3.8-27b',
   'meta-llama/llama-3.3-70b-versatile',
   'meta-llama/llama-4-scout-17b-16e-instruct',
   'meta-llama/llama-4-maverick-17b-128e-instruct',
-  'qwen/qwen3-32b',
+  'llama-3.1-8b-instant',
 ];
+const DEFAULT_MODEL = 'openai/gpt-oss-120b';
 /** Models that exist on providers but cannot serve chat completions (e.g. TTS like canopylabs/orpheus-arabic-saudi). */
-const NON_CHAT_MODEL_PATTERN = /whisper|guard|tts|orpheus|embed|distil-/i;
+const NON_CHAT_MODEL_PATTERN = /whisper|guard|tts|orpheus|embed|distil-|safeguard/i;
 let modelCandidates = null; // { baseUrl, names: [] } ordered list of usable models
 let lastSelectedModel = null;
 const EDITABLE_FIELDS = new Set([
@@ -523,7 +533,10 @@ function isRateLimitError(error) {
 
 /** True when the selected model cannot serve chat completions (e.g. a TTS model). */
 function isUnsupportedModelError(error) {
-  if (error instanceof Error && /does not support chat completions|not supported for chat/i.test(error.message)) return true;
+  if (!(error instanceof Error)) return false;
+  if (/does not support chat completions|not supported for chat/i.test(error.message)) return true;
+  // Provider no longer offers the model (or access was revoked) — fail over.
+  if (/model_not_found|does not exist or you do not have access/i.test(error.message)) return true;
   return false;
 }
 
@@ -541,8 +554,10 @@ function rateLimitWaitSeconds(error) {
 async function getModelCandidates(baseUrl, apiKey) {
   if (modelCandidates?.baseUrl === baseUrl) return modelCandidates.names;
 
-  const configuredModel = process.env.AI_MODEL || 'llama-3.1-8b-instant';
-  let names = [configuredModel, ...FALLBACK_MODELS];
+  const configuredModel = process.env.AI_MODEL || DEFAULT_MODEL;
+  let names = [configuredModel, ...FALLBACK_MODELS].filter(
+    (name) => !NON_CHAT_MODEL_PATTERN.test(name),
+  );
   try {
     const response = await fetch(`${baseUrl}/models`, {
       headers: { Authorization: `Bearer ${apiKey}` },
@@ -553,9 +568,8 @@ async function getModelCandidates(baseUrl, apiKey) {
       // Only ever use models known to support chat completions. Never promote
       // arbitrary discovered models — providers list TTS/ASR/moderation models
       // (e.g. canopylabs/orpheus-arabic-saudi) that reject chat requests.
-      const chatCapable = names.filter(
-        (name) => known.has(name) && !NON_CHAT_MODEL_PATTERN.test(name),
-      );
+      // Models retired by the provider are dropped automatically.
+      const chatCapable = names.filter((name) => known.has(name));
       if (chatCapable.length) names = chatCapable;
     }
   } catch {
@@ -575,7 +589,7 @@ function pickModel(candidates, used) {
 
 async function resolveModel(baseUrl, apiKey) {
   const candidates = await getModelCandidates(baseUrl, apiKey);
-  const configuredModel = process.env.AI_MODEL || 'llama-3.1-8b-instant';
+  const configuredModel = process.env.AI_MODEL || DEFAULT_MODEL;
   const model = candidates.includes(configuredModel) ? configuredModel : candidates[0];
   if (lastSelectedModel && candidates.includes(lastSelectedModel)) return lastSelectedModel;
   lastSelectedModel = model;

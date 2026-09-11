@@ -26,12 +26,13 @@ cp .env.example .env
   (id.atlassian.com → Security → API tokens) for `JIRA_BASE_URL`
   (defaults to `https://arbisoft.atlassian.net`).
 - `AI_API_KEY`: an API key for the configured OpenAI-compatible provider. Groq's
-  developer tier is the default low-cost/free option. The assistant sends questions to the model, while Jira/GitHub facts are
-  retrieved through server-side tools from the dashboard bundle.
+  developer tier is the default low-cost option. The assistant sends questions to the model, while Jira/GitHub facts are
+  retrieved through server-side tools from the dashboard bundle. The model
+  **must support tool calling** (the default `openai/gpt-oss-120b` does).
 - `AI_BASE_URL`: optional provider base URL (defaults to Groq's
   `https://api.groq.com/openai/v1`).
 - `AI_MODEL`: optional model name (defaults to
-  `llama-3.1-8b-instant`).
+  `openai/gpt-oss-120b`).
 
 Requires Node.js 20+.
 
