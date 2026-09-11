@@ -50,6 +50,7 @@
     releaseComparisonDeveloper: '',
     ticketFilters: { status: '', issueType: '', developer: '' },
     sortState: { column: null, direction: 'desc' },
+    reviewLogs: {}, // { [issueKey]: [{ id, reviewer, time_spent, comment, created_at, updated_at }] }
   };
 
   function escapeHtml(value) {
@@ -145,6 +146,30 @@
     });
   }
 
+  function getReviewerOptions() {
+    var reviewers = new Set();
+    // Scan the FULL dataset (not just the selected releases) so every known team
+    // member is selectable in the code-review modal, whatever the current filter.
+    Object.keys(DATA.tickets).forEach(function (key) {
+      var ticket = DATA.tickets[key];
+      if (ticket.assignee_display_name) {
+        reviewers.add(ticket.assignee_display_name);
+      }
+      if (ticket.linked_prs) {
+        ticket.linked_prs.forEach(function (pr) {
+          if (Array.isArray(pr.pr_reviewers)) {
+            pr.pr_reviewers.forEach(function (reviewer) {
+              reviewers.add(reviewer);
+            });
+          }
+        });
+      }
+    });
+    return Array.from(reviewers).sort(function (a, b) {
+      return String(a).localeCompare(String(b));
+    });
+  }
+
   function buildInlineEditorConfig(field, ticket) {
     var value = getEditableDisplayValue(field, ticket);
     if (field === 'status') {
@@ -236,14 +261,32 @@
     if (!ticket) return;
 
     var config = buildInlineEditorConfig(field, ticket);
-    var controlHtml = config.type === 'select'
-      ? '<select class="inline-edit-control">' + config.options.map(function (option) {
+    var controlHtml;
+    if (config.type === 'select') {
+      controlHtml = '<select class="inline-edit-control">' + config.options.map(function (option) {
         var optionValue = typeof option === 'object' ? option.value : option;
         var optionLabel = typeof option === 'object' ? option.label : option;
         var selected = String(optionValue) === String(config.value) ? 'selected' : '';
         return '<option value="' + escapeHtml(optionValue) + '" ' + selected + '>' + escapeHtml(optionLabel) + '</option>';
-      }).join('') + '</select>'
-      : '<input class="inline-edit-control" type="text" value="' + escapeHtml(config.value) + '" />';
+      }).join('') + '</select>';
+    } else if (config.type === 'time') {
+      // Extract hours and minutes from value (e.g., "2.5h" -> 2 hours 30 minutes)
+      var timeValue = config.value || '';
+      var hours = '';
+      var minutes = '';
+      if (timeValue) {
+        var match = timeValue.match(/^(\d+(?:\.\d+)?)h$/);
+        if (match) {
+          var totalHours = parseFloat(match[1]);
+          hours = Math.floor(totalHours);
+          minutes = Math.round((totalHours - hours) * 60);
+        }
+      }
+      controlHtml = '<input class="inline-edit-control inline-time-input" type="number" min="0" max="23" placeholder="h" value="' + hours + '" style="width:50px;display:inline-block;" />h ' +
+        '<input class="inline-edit-control inline-time-input" type="number" min="0" max="59" placeholder="m" value="' + minutes + '" style="width:50px;display:inline-block;" />m';
+    } else {
+      controlHtml = '<input class="inline-edit-control" type="text" value="' + escapeHtml(config.value) + '" />';
+    }
 
     cell.classList.add('is-editing');
     cell.innerHTML = controlHtml;
@@ -251,26 +294,63 @@
     var control = cell.querySelector('.inline-edit-control');
     if (control && typeof control.focus === 'function') {
       control.focus();
-      if (typeof control.select === 'function' && control.tagName === 'INPUT') {
+      if (control.tagName === 'INPUT') {
         control.select();
       }
     }
 
-    control.addEventListener('keydown', function (event) {
-      if (event.key === 'Enter') {
-        event.preventDefault();
-        saveInlineTicketEdit(cell, ticket, field, control);
+    var saveHandler = function () {
+      var newValue;
+      if (config.type === 'time') {
+        var inputs = cell.querySelectorAll('.inline-time-input');
+        var h = parseInt(inputs[0].value, 10) || 0;
+        var m = parseInt(inputs[1].value, 10) || 0;
+        if (h === 0 && m === 0) {
+          newValue = '';
+        } else {
+          newValue = (h + m / 60).toFixed(1) + 'h';
+        }
+      } else {
+        newValue = control.value;
       }
-      if (event.key === 'Escape') {
-        event.preventDefault();
-        cell.classList.remove('is-editing');
-        cell.innerHTML = escapeHtml(getEditableDisplayValue(field, ticket));
-      }
-    });
+      saveInlineTicketEdit(cell, ticket, field, { value: newValue });
+    };
 
-    control.addEventListener('blur', function () {
-      saveInlineTicketEdit(cell, ticket, field, control);
-    });
+    if (config.type === 'time') {
+      var inputs = cell.querySelectorAll('.inline-time-input');
+      inputs.forEach(function (input) {
+        input.addEventListener('keydown', function (event) {
+          if (event.key === 'Enter') {
+            event.preventDefault();
+            saveHandler();
+          }
+          if (event.key === 'Escape') {
+            event.preventDefault();
+            cell.classList.remove('is-editing');
+            cell.innerHTML = escapeHtml(getEditableDisplayValue(field, ticket));
+          }
+        });
+        input.addEventListener('blur', function () {
+          saveHandler();
+        });
+      });
+    } else {
+      control.addEventListener('keydown', function (event) {
+        if (event.key === 'Enter') {
+          event.preventDefault();
+          saveInlineTicketEdit(cell, ticket, field, control);
+        }
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          cell.classList.remove('is-editing');
+          cell.innerHTML = escapeHtml(getEditableDisplayValue(field, ticket));
+        }
+      });
+
+      control.addEventListener('blur', function () {
+        saveInlineTicketEdit(cell, ticket, field, control);
+      });
+    }
   }
 
   function bindInlineTicketEditing(container) {
@@ -323,79 +403,261 @@
       .join('<br>');
   }
 
-  function codeReviewersHtml(ticket) {
-    if (!ticket.linked_prs || ticket.linked_prs.length === 0) {
-      return '<span class="empty-state">No reviews</span>';
-    }
-    var allReviewers = new Set();
-    ticket.linked_prs.forEach(function (pr) {
-      if (pr.pr_reviewers && Array.isArray(pr.pr_reviewers)) {
-        pr.pr_reviewers.forEach(function (reviewer) {
-          allReviewers.add(reviewer);
-        });
-      }
-    });
-    if (allReviewers.size === 0) {
-      return '<span class="empty-state">No reviewers</span>';
-    }
-    return Array.from(allReviewers).join(', ');
+  function reviewLogsForIssue(issueKey) {
+    return (state.reviewLogs && state.reviewLogs[issueKey]) || [];
   }
 
-  function buildCodeReviewMetrics(tickets) {
-    var allReviewTimings = [];
-    var allCompletionTimings = [];
-    var allReviewerNames = new Set();
-    var totalPrsWithReview = 0;
-    var prReviewDetails = [];
+  function renderReviewLogsColumn(ticket) {
+    var logs = reviewLogsForIssue(ticket.key);
+    var rows = logs
+      .map(function (log) {
+        return (
+          '<div class="review-log-entry" data-issue-key="' +
+          escapeHtml(ticket.key) +
+          '" data-log-id="' +
+          escapeHtml(log.id) +
+          '"><span class="review-log-label">' +
+          escapeHtml(log.reviewer) +
+          '</span><span class="review-log-time">' +
+          escapeHtml(log.time_spent) +
+          '</span><span class="review-log-actions">' +
+          '<button type="button" class="review-log-action-btn review-log-edit" title="Edit this review log">Edit</button>' +
+          '<button type="button" class="review-log-action-btn delete review-log-delete" title="Delete this review log">&times;</button>' +
+          '</span></div>'
+        );
+      })
+      .join('');
 
-    tickets.forEach(function (ticket) {
-      if (!ticket.linked_prs) return;
-      ticket.linked_prs.forEach(function (pr) {
-        // Add to review details if it has reviewers OR review timing data
-        if ((pr.pr_reviewers && pr.pr_reviewers.length > 0) || pr.pr_review_completion_time_hours !== null) {
-          prReviewDetails.push({
-            repo: pr.repo.split('/')[1],
-            pr_number: pr.pr_number,
-            pr_url: pr.pr_url,
-            completion_time: pr.pr_review_completion_time_hours,
-            first_review_time: pr.pr_time_to_first_review_hours,
-            state: pr.pr_state,
-            reviewers: pr.pr_reviewers || [],
-          });
+    return (
+      '<td class="review-log-cell" data-issue-key="' +
+      escapeHtml(ticket.key) +
+      '"><div class="review-log-list">' +
+      (rows || '<span class="empty-state">No review time logged</span>') +
+      '</div>' +
+      '<button type="button" class="log-review-btn" data-issue-key="' +
+      escapeHtml(ticket.key) +
+      '">Log code review time</button></td>'
+    );
+  }
+
+  function loadReviewLogs() {
+    fetch('/api/reviews', {
+      method: 'GET',
+      headers: { 'Content-Type': 'application/json' },
+    })
+      .then(function (response) { return response.json(); })
+      .then(function (payload) {
+        if (payload.ok && payload.review_logs && typeof payload.review_logs === 'object') {
+          state.reviewLogs = payload.review_logs;
         }
-        
-        if (pr.pr_reviewers && pr.pr_reviewers.length > 0) {
-          totalPrsWithReview++;
-          pr.pr_reviewers.forEach(function (reviewer) {
-            allReviewerNames.add(reviewer);
-          });
-        }
-        if (pr.pr_time_to_first_review_hours !== null) {
-          allReviewTimings.push(pr.pr_time_to_first_review_hours);
-        }
-        if (pr.pr_review_completion_time_hours !== null) {
-          allCompletionTimings.push(pr.pr_review_completion_time_hours);
-        }
+        renderAllTickets();
+      })
+      .catch(function () {
+        state.reviewLogs = state.reviewLogs || {};
+        renderAllTickets();
       });
+  }
+
+  function parseReviewTimeParts(value) {
+    var text = String(value || '').trim();
+    var match = text.match(/^(\d+(?:\.\d+)?)h$/);
+    if (!match) return { h: '', m: '' };
+    var total = parseFloat(match[1]);
+    var h = Math.floor(total);
+    var m = Math.round((total - h) * 60);
+    if (m === 60) { h += 1; m = 0; }
+    return { h: h, m: m };
+  }
+
+  var reviewModalEscHandler = null;
+
+  function closeReviewModal(overlay) {
+    if (reviewModalEscHandler) {
+      document.removeEventListener('keydown', reviewModalEscHandler);
+      reviewModalEscHandler = null;
+    }
+    if (overlay && typeof overlay.remove === 'function') overlay.remove();
+  }
+
+  function openReviewLogModal(issueKey, logId) {
+    var ticket = DATA.tickets[issueKey];
+    if (!ticket) return;
+
+    var review = null;
+    if (logId) {
+      var existing = reviewLogsForIssue(issueKey);
+      for (var i = 0; i < existing.length; i += 1) {
+        if (existing[i].id === logId) { review = existing[i]; break; }
+      }
+    }
+
+    var time = review ? parseReviewTimeParts(review.time_spent) : { h: '', m: '' };
+
+    var reviewerOptions = getReviewerOptions().slice();
+    if (review && reviewerOptions.indexOf(review.reviewer) === -1) reviewerOptions.unshift(review.reviewer);
+    var optionsHtml = '<option value="">Select reviewer…</option>';
+    reviewerOptions.forEach(function (name) {
+      var selected = review && review.reviewer === name ? ' selected' : '';
+      optionsHtml += '<option value="' + escapeHtml(name) + '"' + selected + '>' + escapeHtml(name) + '</option>';
     });
 
-    var avgReviewTime = allReviewTimings.length > 0
-      ? allReviewTimings.reduce(function (a, b) { return a + b; }, 0) / allReviewTimings.length
-      : null;
+    var overlay = document.createElement('div');
+    overlay.className = 'modal-backdrop review-modal';
+    overlay.setAttribute('data-issue-key', issueKey);
+    overlay.setAttribute('data-log-id', logId || '');
 
-    var avgCompletionTime = allCompletionTimings.length > 0
-      ? allCompletionTimings.reduce(function (a, b) { return a + b; }, 0) / allCompletionTimings.length
-      : null;
+    var title = (logId ? 'Edit code review log' : 'Log code review time') + ' — ' + issueKey;
 
-    return {
-      avg_review_time_hours: avgReviewTime,
-      avg_completion_time_hours: avgCompletionTime,
-      prs_with_review: totalPrsWithReview,
-      unique_reviewers: Array.from(allReviewerNames).sort(),
-      pr_details: prReviewDetails.sort(function (a, b) {
-        return b.completion_time - a.completion_time; // Sort by completion time descending
-      }),
+    overlay.innerHTML =
+      '<div class="modal-card review-modal-card" role="dialog" aria-modal="true" aria-labelledby="review-modal-title">' +
+      '<div class="assistant-modal-header"><h2 id="review-modal-title">' +
+      escapeHtml(title) +
+      '</h2><button type="button" class="assistant-close review-modal-close" aria-label="Close">&times;</button></div>' +
+      '<div class="review-modal-body">' +
+      '<label class="filter-label">Reviewer<select class="review-modal-reviewer">' +
+      optionsHtml +
+      '</select></label>' +
+      '<label class="filter-label">Time spent on review<span class="review-time-inputs">' +
+      '<input type="number" class="review-time-hours" min="0" max="23" step="1" placeholder="h" value="' + escapeHtml(time.h) + '" /> h ' +
+      '<input type="number" class="review-time-minutes" min="0" max="59" step="1" placeholder="m" value="' + escapeHtml(time.m) + '" /> m' +
+      '</span></label>' +
+      '<p class="review-modal-note">Saving posts a comment to the Jira ticket <strong>' +
+      escapeHtml(issueKey) +
+      '</strong> and stores this log so it shows here next time.</p>' +
+      '<div class="review-modal-actions">' +
+      '<button type="button" class="inline-btn review-modal-cancel">Cancel</button>' +
+      '<button type="button" class="review-modal-save">' +
+      (logId ? 'Save changes' : 'Save & post to Jira') +
+      '</button>' +
+      '</div>' +
+      '</div>' +
+      '</div>';
+
+    document.body.appendChild(overlay);
+
+    reviewModalEscHandler = function (event) {
+      if (event.key === 'Escape') closeReviewModal(overlay);
     };
+    document.addEventListener('keydown', reviewModalEscHandler);
+
+    overlay.addEventListener('click', function (event) {
+      if (event.target === overlay) closeReviewModal(overlay);
+    });
+    overlay.querySelector('.review-modal-close').addEventListener('click', function () { closeReviewModal(overlay); });
+    overlay.querySelector('.review-modal-cancel').addEventListener('click', function () { closeReviewModal(overlay); });
+    overlay.querySelector('.review-modal-save').addEventListener('click', function () { submitReviewLog(overlay); });
+
+    var reviewerSelect = overlay.querySelector('.review-modal-reviewer');
+    if (reviewerSelect && typeof reviewerSelect.focus === 'function') {
+      reviewerSelect.focus();
+    }
+  }
+
+  function submitReviewLog(overlay) {
+    var issueKey = overlay.getAttribute('data-issue-key');
+    var logId = overlay.getAttribute('data-log-id') || '';
+    var reviewer = overlay.querySelector('.review-modal-reviewer').value.trim();
+    var hours = parseInt(overlay.querySelector('.review-time-hours').value, 10) || 0;
+    var minutes = parseInt(overlay.querySelector('.review-time-minutes').value, 10) || 0;
+
+    if (!reviewer) {
+      window.alert('Please select a reviewer.');
+      return;
+    }
+    if (hours < 0 || hours > 23 || minutes < 0 || minutes > 59) {
+      window.alert('Please enter a valid time (0–23 hours, 0–59 minutes).');
+      return;
+    }
+    if (hours === 0 && minutes === 0) {
+      window.alert('Please enter a time greater than zero.');
+      return;
+    }
+
+    var timeSpent = (Math.round((hours + minutes / 60) * 10) / 10).toFixed(1) + 'h';
+
+    var payload = {
+      action: logId ? 'update' : 'add',
+      issueKey: issueKey,
+      reviewer: reviewer,
+      time_spent: timeSpent,
+    };
+    if (logId) payload.id = logId;
+
+    var saveBtn = overlay.querySelector('.review-modal-save');
+    saveBtn.disabled = true;
+    saveBtn.textContent = 'Saving…';
+
+    fetch('/api/reviews', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
+      .then(function (response) {
+        return response.json().then(function (resp) {
+          if (!response.ok || !resp.ok) throw new Error(resp.error || 'Unable to save the review log.');
+          return resp;
+        });
+      })
+      .then(function (resp) {
+        if (resp.logs && resp.logs.length > 0) state.reviewLogs[issueKey] = resp.logs;
+        else delete state.reviewLogs[issueKey];
+        closeReviewModal(overlay);
+        renderAllTickets();
+        window.alert((logId ? 'Code review log updated and comment posted to ' : 'Code review log saved and comment posted to ') + issueKey + '.');
+      })
+      .catch(function (error) {
+        window.alert(error.message);
+        saveBtn.disabled = false;
+        saveBtn.textContent = logId ? 'Save changes' : 'Save & post to Jira';
+      });
+  }
+
+  function deleteReviewLogEntry(issueKey, logId) {
+    if (!window.confirm('Delete this code-review log entry? It will be removed from the dashboard; the Jira comment history stays untouched.')) return;
+
+    fetch('/api/reviews', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'delete', issueKey: issueKey, id: logId }),
+    })
+      .then(function (response) {
+        return response.json().then(function (resp) {
+          if (!response.ok || !resp.ok) throw new Error(resp.error || 'Unable to delete the review log.');
+          return resp;
+        });
+      })
+      .then(function (resp) {
+        if (resp.logs && resp.logs.length > 0) state.reviewLogs[issueKey] = resp.logs;
+        else delete state.reviewLogs[issueKey];
+        renderAllTickets();
+      })
+      .catch(function (error) {
+        window.alert(error.message);
+      });
+  }
+
+  function bindReviewLogActions(container) {
+    if (container.__reviewLogBound) return;
+    container.addEventListener('click', function (event) {
+      var target = event.target;
+      var addBtn = target.closest ? target.closest('.log-review-btn') : null;
+      if (addBtn) {
+        openReviewLogModal(addBtn.getAttribute('data-issue-key'), null);
+        return;
+      }
+      var editBtn = target.closest ? target.closest('.review-log-edit') : null;
+      if (editBtn) {
+        var entry = editBtn.closest('.review-log-entry');
+        if (entry) openReviewLogModal(entry.getAttribute('data-issue-key'), entry.getAttribute('data-log-id'));
+        return;
+      }
+      var deleteBtn = target.closest ? target.closest('.review-log-delete') : null;
+      if (deleteBtn) {
+        var deleteEntry = deleteBtn.closest('.review-log-entry');
+        if (deleteEntry) deleteReviewLogEntry(deleteEntry.getAttribute('data-issue-key'), deleteEntry.getAttribute('data-log-id'));
+      }
+    });
+    container.__reviewLogBound = true;
   }
 
   function renderReleasePicker() {
@@ -631,48 +893,6 @@
     });
   }
 
-  function renderCodeReviewMetrics() {
-    var el = document.getElementById('code-review-metrics');
-    var metrics = buildCodeReviewMetrics(getVisibleTickets());
-    
-    var reviewersList = metrics.unique_reviewers.length > 0
-      ? '<ul>' + metrics.unique_reviewers.map(function (r) { return '<li>' + escapeHtml(r) + '</li>'; }).join('') + '</ul>'
-      : '<p class="empty-state">No reviewers found</p>';
-
-    var prDetailsRows = metrics.pr_details.length > 0
-      ? metrics.pr_details
-          .map(function (pr) {
-            var reviewDuration = pr.completion_time !== null 
-              ? fmtNum(pr.completion_time, 1) + 'h'
-              : (pr.first_review_time !== null ? fmtNum(pr.first_review_time, 1) + 'h (first review)' : '—');
-            return (
-              '<tr><td><a href="' + escapeHtml(pr.pr_url) + '" target="_blank" rel="noopener">' +
-              escapeHtml(pr.repo) + ' #' + pr.pr_number + '</a></td><td>' +
-              escapeHtml(pr.reviewers.join(', ') || 'N/A') + '</td><td>' +
-              reviewDuration + '</td><td>' +
-              escapeHtml(pr.state) + '</td></tr>'
-            );
-          })
-          .join('')
-      : '<tr><td colspan="4" class="empty-state">No PRs with review data available.</td></tr>';
-
-    var content =
-      '<div class="kpi-row">' +
-      kpiTile('Avg. time to first review', metrics.avg_review_time_hours === null ? '—' : fmtNum(metrics.avg_review_time_hours, 1) + 'h') +
-      kpiTile('Avg. time to review completion', metrics.avg_completion_time_hours === null ? '—' : fmtNum(metrics.avg_completion_time_hours, 1) + 'h') +
-      kpiTile('PRs with reviews', fmtNum(metrics.prs_with_review)) +
-      kpiTile('Unique reviewers', fmtNum(metrics.unique_reviewers.length)) +
-      '</div>' +
-      '<h3 class="subsection-title">Code reviewers</h3>' +
-      reviewersList +
-      '<h3 class="subsection-title">PR Review Duration by State</h3>' +
-      '<table class="data-table"><thead><tr><th>PR</th><th>Reviewers</th><th>Review Duration</th><th>State</th></tr></thead><tbody>' +
-      prDetailsRows +
-      '</tbody></table>';
-
-    el.innerHTML = content;
-  }
-
   function renderCycleTime() {
     var el = document.getElementById('cycle-time');
     var dist = buildCycleTimeDistribution(getVisibleTickets());
@@ -903,7 +1123,7 @@
       sortHeader('sp', 'SP') +
       sortHeader('ap', 'AP') +
       sortHeader('ai_contribution_percent', 'AI Contribution') +
-      '<th>PR(s)</th><th>Code Reviewers</th></tr>';
+      '<th>PR(s)</th><th>Code Review</th></tr>';
 
     var body = tickets
       .map(function (t) {
@@ -922,7 +1142,7 @@
           renderEditableCell(t, 'ap') +
           renderEditableCell(t, 'ai_contribution_percent') +
           '<td>' + prLinksHtml(t) + '</td>' +
-          '<td>' + codeReviewersHtml(t) + '</td>' +
+          renderReviewLogsColumn(t) +
           '</tr>'
         );
       })
@@ -930,11 +1150,11 @@
 
     el.innerHTML =
       filtersHtml +
-      '<table class="data-table" id="all-tickets-table"><thead>' +
+      '<div class="table-scroll-container"><table class="data-table" id="all-tickets-table"><thead>' +
       head +
       '</thead><tbody>' +
       (body || '<tr><td colspan="10" class="empty-state">No tickets match the current filters.</td></tr>') +
-      '</tbody></table>';
+      '</tbody></table></div>';
 
     el.querySelector('#filter-status').addEventListener('change', function (e) {
       state.ticketFilters.status = e.target.value;
@@ -951,6 +1171,7 @@
       renderDeveloperDetails();
     });
     bindInlineTicketEditing(el);
+    bindReviewLogActions(el);
     Array.prototype.forEach.call(el.querySelectorAll('th.sortable'), function (th) {
       th.addEventListener('click', function () {
         var col = th.getAttribute('data-sort-col');
@@ -973,7 +1194,6 @@
     renderIssueTypeBreakdown();
     renderEngineeringActivityTrend();
     renderPrActivityTrend();
-    renderCodeReviewMetrics();
     renderCycleTime();
     renderDeveloperDelivery();
     renderDeveloperDetails();
@@ -1011,4 +1231,6 @@
   renderReleasePicker();
   renderAll();
   bindDashboardRefresh();
+  initChartActions(document);
+  loadReviewLogs();
 })();

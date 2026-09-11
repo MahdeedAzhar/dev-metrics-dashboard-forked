@@ -30,71 +30,9 @@ function parseArgs(argv) {
   return args;
 }
 
-/**
- * Extracts code review metrics from reviews and comments. Calculates:
- * - reviewers: unique reviewers who submitted a review or comment
- * - time_to_first_review_hours: hours from PR creation to first review/comment
- * - time_to_approval_hours: hours from PR creation to first approval
- * - review_completion_time_hours: hours from PR creation to all reviews done (last review/approval)
- */
-function extractReviewMetrics(reviews, comments, prCreatedAt) {
-  const prCreatedTime = new Date(prCreatedAt).getTime();
-  const reviewerSet = new Set();
-  let firstReviewTime = null;
-  let firstApprovalTime = null;
-  let lastReviewTime = null;
-
-  // Process formal reviews (APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED)
-  if (reviews && Array.isArray(reviews)) {
-    for (const review of reviews) {
-      // Include all review states except PENDING (which are draft/uncommitted reviews)
-      if (review.state && review.state !== 'PENDING') {
-        const reviewTime = new Date(review.submitted_at).getTime();
-        
-        if (!firstReviewTime) {
-          firstReviewTime = reviewTime;
-        }
-        lastReviewTime = reviewTime; // Keep updating to get the last one
-
-        if (review.state === 'APPROVED' && !firstApprovalTime) {
-          firstApprovalTime = reviewTime;
-        }
-
-        if (review.user?.login) {
-          reviewerSet.add(review.user.login);
-        }
-      }
-    }
-  }
-
-  // Process PR comments (these are separate from formal reviews)
-  if (comments && Array.isArray(comments)) {
-    for (const comment of comments) {
-      const commentTime = new Date(comment.created_at).getTime();
-      
-      if (!firstReviewTime) {
-        firstReviewTime = commentTime;
-      }
-      lastReviewTime = commentTime; // Keep updating to get the last one
-
-      if (comment.user?.login) {
-        reviewerSet.add(comment.user.login);
-      }
-    }
-  }
-
-  return {
-    reviewers: [...reviewerSet],
-    time_to_first_review_hours: firstReviewTime ? (firstReviewTime - prCreatedTime) / (1000 * 60 * 60) : null,
-    time_to_approval_hours: firstApprovalTime ? (firstApprovalTime - prCreatedTime) / (1000 * 60 * 60) : null,
-    review_completion_time_hours: lastReviewTime ? (lastReviewTime - prCreatedTime) / (1000 * 60 * 60) : null,
-  };
-}
-
 function buildPrRecord(repo, rawPr, activity) {
   const { ticketId, source } = extractTicketId(rawPr.title, rawPr.body);
-  const reviewMetrics = extractReviewMetrics(activity.reviews, activity.comments, rawPr.created_at);
-  
+
   return {
     id: `${repo}#${rawPr.number}`,
     repo,
@@ -108,10 +46,6 @@ function buildPrRecord(repo, rawPr, activity) {
     ticket_source: source,
     ai_contribution: combineAiSignals(parseAiChecklist(rawPr.body), computeCommitAiPercent(activity.commits)),
     assignee_login: rawPr.assignee?.login ?? null,
-    reviewers: reviewMetrics.reviewers,
-    time_to_first_review_hours: reviewMetrics.time_to_first_review_hours,
-    time_to_approval_hours: reviewMetrics.time_to_approval_hours,
-    review_completion_time_hours: reviewMetrics.review_completion_time_hours,
     fetched_at: new Date().toISOString(),
   };
 }

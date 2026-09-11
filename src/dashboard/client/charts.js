@@ -23,6 +23,64 @@ function chartFmtNum(value, digits) {
   return value.toLocaleString(undefined, { maximumFractionDigits: digits || 0 });
 }
 
+// Chart action buttons SVG icons
+const CHART_ICONS = {
+  expand: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>'
+};
+
+// Create chart action buttons HTML
+function chartActionsHtml(chartId, svgContent) {
+  return `<div class="chart-actions">
+    <button class="chart-action-btn chart-expand-btn" data-chart-id="${chartId}" data-svg="${encodeURIComponent(svgContent)}" title="Open in full screen">${CHART_ICONS.expand} Fullscreen</button>
+  </div>`;
+}
+
+// Open chart in full-screen modal
+function openChartFullscreen(svgContent, title) {
+  // Remove any existing modal
+  const existingModal = document.querySelector('.chart-modal-overlay');
+  if (existingModal) existingModal.remove();
+  
+  const overlay = document.createElement('div');
+  overlay.className = 'chart-modal-overlay';
+  overlay.innerHTML = `<div class="chart-modal">
+    <button class="chart-modal-close">&times;</button>
+    <div class="chart-modal-body">
+      ${title ? `<h3 style="margin:0 0 16px;">${chartEscapeHtml(title)}</h3>` : ''}
+      ${decodeURIComponent(svgContent)}
+    </div>
+  </div>`;
+  
+  document.body.appendChild(overlay);
+  
+  // Close on click
+  overlay.querySelector('.chart-modal-close').addEventListener('click', () => overlay.remove());
+  overlay.addEventListener('click', (e) => {
+    if (e.target === overlay) overlay.remove();
+  });
+  
+  // Close on Escape key
+  document.addEventListener('keydown', function escHandler(e) {
+    if (e.key === 'Escape') {
+      overlay.remove();
+      document.removeEventListener('keydown', escHandler);
+    }
+  });
+}
+
+// Initialize chart action buttons
+function initChartActions(container) {
+  container.addEventListener('click', function(e) {
+    const expandBtn = e.target.closest('.chart-expand-btn');
+    
+    if (expandBtn) {
+      const svgContent = expandBtn.getAttribute('data-svg');
+      const title = expandBtn.closest('.card')?.querySelector('h2, h3')?.textContent || 'Chart';
+      openChartFullscreen(svgContent, title);
+    }
+  });
+}
+
 /**
  * Multi-series line chart (up to 4 series, one axis — two measures of
  * different scale get two separate charts, never a second y-axis). Each
@@ -108,14 +166,20 @@ function buildLineChart(series, options) {
           .join('')}</div>`
       : '';
 
+  const svgContent = `<svg viewBox="0 0 ${width} ${height}" width="100%" height="${height}" role="img" aria-label="${chartEscapeHtml(opts.ariaLabel || 'Line chart')}">
+    ${gridLines}
+    ${refLineSvg}
+    ${seriesSvg}
+    ${xAxisLabels}
+  </svg>`;
+
+  const chartId = `chart-${Math.random().toString(36).substr(2, 9)}`;
   return `
-    ${legend}
-    <svg viewBox="0 0 ${width} ${height}" width="100%" height="${height}" role="img" aria-label="${chartEscapeHtml(opts.ariaLabel || 'Line chart')}">
-      ${gridLines}
-      ${refLineSvg}
-      ${seriesSvg}
-      ${xAxisLabels}
-    </svg>
+    <div class="chart-container" id="${chartId}">
+      ${legend}
+      ${chartActionsHtml(chartId, svgContent)}
+      ${svgContent}
+    </div>
   `;
 }
 
@@ -163,8 +227,11 @@ function buildReleasePointComparisonChart(rows) {
   }).join('');
 
   return `
-    <div class="chart-legend"><span class="chart-legend-item"><span class="chart-legend-swatch" style="background:var(--series-1)"></span>Planned SP</span><span class="chart-legend-item"><span class="chart-legend-swatch" style="background:var(--series-2)"></span>Delivered AP</span></div>
-    <div style="overflow-x:auto"><svg viewBox="0 0 ${width} ${height}" width="100%" height="${height}" role="img" aria-label="Planned Story Points and delivered Actual Points by release">${gridLines}${bars}</svg></div>`;
+    <div class="chart-container">
+      <div class="chart-legend"><span class="chart-legend-item"><span class="chart-legend-swatch" style="background:var(--series-1)"></span>Planned SP</span><span class="chart-legend-item"><span class="chart-legend-swatch" style="background:var(--series-2)"></span>Delivered AP</span></div>
+      ${chartActionsHtml('release-point-chart', `<svg viewBox="0 0 ${width} ${height}" width="100%" height="${height}" role="img" aria-label="Planned Story Points and delivered Actual Points by release">${gridLines}${bars}</svg>`)}
+      <div style="overflow-x:auto"><svg viewBox="0 0 ${width} ${height}" width="100%" height="${height}" role="img" aria-label="Planned Story Points and delivered Actual Points by release">${gridLines}${bars}</svg></div>
+    </div>`;
 }
 
 /**
@@ -217,4 +284,98 @@ function buildHistogramBars(buckets) {
     )
     .join('');
   return `<div class="histogram">${rows}</div>`;
+}
+
+/**
+ * Attractive, theme-aware grouped bar chart rendered from a tiny spec the
+ * assistant can emit inside a ```chart fenced block. Kept on the global scope
+ * (charts.js is intentionally not IIFE-wrapped) so the assistant chat and any
+ * other consumer can call it. Up to 4 series, one per dashboard palette slot.
+ *
+ * spec = {
+ *   title?: string,        // chart heading
+ *   subtitle?: string,     // optional sub-line under the title
+ *   categories: string[],  // x-axis labels
+ *   series:  [{ name: string, values: number[] }]
+ * }
+ */
+function renderAssistantChart(rawSpec) {
+  const spec = rawSpec && typeof rawSpec === 'object' ? rawSpec : {};
+  const series = (Array.isArray(spec.series) ? spec.series : [])
+    .slice(0, 4)
+    .map((sr, i) => ({
+      name: sr && String(sr.name ?? '').trim() || `Series ${i + 1}`,
+      values: Array.isArray(sr && sr.values) ? sr.values.map((v) => Number(v) || 0) : [],
+    }));
+
+  const categories = (Array.isArray(spec.categories) ? spec.categories : []).map((c) => String(c ?? ''));
+  const maxCount = Math.max(1, categories.length, ...series.map((s) => s.values.length));
+  while (categories.length < maxCount) categories.push('');
+  for (const s of series) while (s.values.length < maxCount) s.values.push(0);
+
+  if (series.length === 0 || !series.some((s) => s.values.some((v) => v > 0))) {
+    return '<p class="empty-state">No data to chart.</p>';
+  }
+
+  const color = (i) => CHART_SERIES_COLORS[i % CHART_SERIES_COLORS.length];
+
+  const width = Math.max(480, maxCount * 90);
+  const height = 210;
+  const padding = { top: 30, right: 20, bottom: 42, left: 44 };
+  const plotW = width - padding.left - padding.right;
+  const plotH = height - padding.top - padding.bottom;
+  const maxValue = Math.max(1, ...series.flatMap((s) => s.values));
+  const yAt = (v) => padding.top + plotH - (v / maxValue) * plotH;
+  const groupW = plotW / maxCount;
+  const barW = Math.max(5, Math.min(20, (groupW * 0.72) / series.length));
+  const gap = series.length > 1 ? 3 : 0;
+
+  const gridlines = [0, 0.25, 0.5, 0.75, 1]
+    .map((frac) => {
+      const y = padding.top + plotH * (1 - frac);
+      return `<line x1="${padding.left}" y1="${y.toFixed(1)}" x2="${width - padding.right}" y2="${y.toFixed(1)}" class="chart-gridline" />
+        <text x="${padding.left - 6}" y="${y + 4}" class="chart-axis-label" text-anchor="end">${chartFmtNum(maxValue * frac)}</text>`;
+    })
+    .join('');
+
+  const barGroups = categories.map((cat, ci) => {
+    const groupCenter = padding.left + groupW * ci + groupW / 2;
+    const totalW = series.length * barW + (series.length - 1) * gap;
+    const groupStart = groupCenter - totalW / 2;
+    return series.map((s, si) => {
+      const val = s.values[ci] || 0;
+      if (val <= 0) return '';
+      const x = groupStart + si * (barW + gap);
+      const y = yAt(val);
+      const h = padding.top + plotH - y;
+      const r = Math.min(4, barW / 2, h / 2);
+      const delay = (ci * series.length + si) * 0.05;
+      return `
+        <rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${barW.toFixed(1)}" height="${h.toFixed(1)}" rx="${r.toFixed(1)}" fill="${color(si)}" class="assistant-bar" style="animation-delay:${delay.toFixed(2)}s">
+          <title>${chartEscapeHtml(cat || '')} ${chartEscapeHtml(s.name)}: ${chartFmtNum(val)}</title>
+        </rect>
+        <text x="${(x + barW / 2).toFixed(1)}" y="${(y - 5).toFixed(1)}" class="chart-axis-label assistant-bar-label" text-anchor="middle" font-size="10" style="animation-delay:${(delay + 0.25).toFixed(2)}s">${chartFmtNum(val)}</text>`;
+    }).join('');
+  }).join('');
+
+  const catLabels = categories.map((cat, ci) => {
+    const groupCenter = padding.left + groupW * ci + groupW / 2;
+    const cx = Math.min(Math.max(groupCenter, padding.left + 14), width - padding.right - 14);
+    return `<text x="${cx.toFixed(1)}" y="${height - 8}" class="chart-axis-label" text-anchor="middle">${chartEscapeHtml(cat || '')}</text>`;
+  }).join('');
+
+  const legend = `<div class="chart-legend">${series
+    .map((s, i) => `<span class="chart-legend-item"><span class="chart-legend-swatch" style="background:${color(i)}"></span>${chartEscapeHtml(s.name)}</span>`)
+    .join('')}</div>`;
+
+  const title = spec.title
+    ? `<div class="assistant-chart-title">${chartEscapeHtml(String(spec.title))}${spec.subtitle ? `<span class="assistant-chart-subtitle"> ${chartEscapeHtml(String(spec.subtitle))}</span>` : ''}</div>`
+    : '';
+
+  const svgContent = `<svg viewBox="0 0 ${width} ${height}" width="100%" height="${height}" role="img" aria-label="${chartEscapeHtml(String(spec.title || 'Assistant chart'))}">${gridlines}${barGroups}${catLabels}</svg>`;
+  const chartId = `assistant-chart-${Math.random().toString(36).substr(2, 9)}`;
+
+  return `<div class="assistant-chart-wrap" id="${chartId}">${title}${legend}${chartActionsHtml(chartId, svgContent)}<div style="overflow-x:auto">
+    ${svgContent}
+  </div></div>`;
 }

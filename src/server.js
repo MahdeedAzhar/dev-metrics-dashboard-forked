@@ -5,7 +5,9 @@ import { fileURLToPath } from 'node:url';
 import { generateDashboard } from './index.js';
 import { renderDashboard } from './dashboard/render.js';
 import { updateJiraIssueField } from './fetch/jira.js';
+import { getReviewLogsMap, addReviewLog, updateReviewLog, deleteReviewLog } from './reviews/service.js';
 import { log, warn } from './utils/logger.js';
+import { answerAssistantQuestion, applyAssistantUpdate } from './ai/assistant.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const outputRoot = path.join(__dirname, '..', 'data', 'output');
@@ -60,6 +62,12 @@ function readJsonBody(req) {
   });
 }
 
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, (character) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  })[character]);
+}
+
 async function bootstrap() {
   await refreshData();
   setInterval(() => {
@@ -100,6 +108,76 @@ async function bootstrap() {
         res.end(JSON.stringify({ ok: false, error: error.message }));
         return;
       }
+    }
+
+    if (req.url === '/api/reviews') {
+      try {
+        if (req.method === 'GET') {
+          const logs = await getReviewLogsMap();
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+          res.end(JSON.stringify({ ok: true, review_logs: logs }));
+          return;
+        }
+
+        if (req.method !== 'POST') {
+          res.writeHead(405, { Allow: 'GET, POST' });
+          res.end();
+          return;
+        }
+
+        const body = await readJsonBody(req);
+        const action = String(body.action ?? 'add').trim().toLowerCase();
+        const bundle = JSON.parse(lastBundleJson || '{}');
+
+        if (action === 'add') {
+          const result = await addReviewLog({ issueKey: body.issueKey, reviewer: body.reviewer, timeSpent: body.time_spent ?? body.timeSpent, bundle });
+          res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+          res.end(JSON.stringify({ ok: true, ...result }));
+          return;
+        }
+
+        if (action === 'update') {
+          const result = await updateReviewLog({ issueKey: body.issueKey, logId: body.id, reviewer: body.reviewer, timeSpent: body.time_spent ?? body.timeSpent, bundle });
+          res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+          res.end(JSON.stringify({ ok: true, ...result }));
+          return;
+        }
+
+        if (action === 'delete') {
+          const result = await deleteReviewLog({ issueKey: body.issueKey, logId: body.id, bundle });
+          res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+          res.end(JSON.stringify({ ok: true, ...result }));
+          return;
+        }
+
+        res.writeHead(400, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+        res.end(JSON.stringify({ ok: false, error: `Unknown review action: ${action}` }));
+        return;
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+        res.end(JSON.stringify({ ok: false, error: error.message }));
+      }
+      return;
+    }
+
+    if (req.method === 'POST' && req.url === '/api/assistant') {
+      try {
+        const body = await readJsonBody(req);
+        const bundle = JSON.parse(lastBundleJson || '{}');
+        if (body.confirm) {
+          const action = await applyAssistantUpdate(body.confirm, bundle, refreshData);
+          res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+          res.end(JSON.stringify({ ok: true, action }));
+          return;
+        }
+        const result = await answerAssistantQuestion(bundle, Array.isArray(body.messages) ? body.messages : []);
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+        res.end(JSON.stringify({ ok: true, ...result }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+        res.end(JSON.stringify({ ok: false, error: error.message }));
+      }
+      return;
     }
 
     if (req.url === '/bundle.json') {

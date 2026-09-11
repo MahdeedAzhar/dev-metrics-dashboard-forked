@@ -25,6 +25,13 @@ cp .env.example .env
 - `JIRA_EMAIL` / `JIRA_API_TOKEN`: a Jira Cloud API token
   (id.atlassian.com → Security → API tokens) for `JIRA_BASE_URL`
   (defaults to `https://arbisoft.atlassian.net`).
+- `AI_API_KEY`: an API key for the configured OpenAI-compatible provider. Groq's
+  developer tier is the default low-cost/free option. The assistant sends questions to the model, while Jira/GitHub facts are
+  retrieved through server-side tools from the dashboard bundle.
+- `AI_BASE_URL`: optional provider base URL (defaults to Groq's
+  `https://api.groq.com/openai/v1`).
+- `AI_MODEL`: optional model name (defaults to
+  `llama-3.1-8b-instant`).
 
 Requires Node.js 20+.
 
@@ -68,6 +75,19 @@ The live dashboard also supports choosing the startup release selection via URL 
 - Multiple query params (equivalent): `http://localhost:3000/?releases=8.5.0&releases=8.6.0`
 
 If both query params and `DEFAULT_RELEASES` are provided, the query params take precedence.
+
+### Engineering data assistant
+
+The dashboard includes a protected assistant panel powered by an
+OpenAI-compatible model provider. It can
+search the dashboard's Jira tickets and linked GitHub pull requests, calculate
+release summaries, and answer questions about developers, story points, actual
+points, statuses, and delivery evidence. It is constrained to the data tools
+defined by the server, so answers can only use the current dashboard bundle.
+
+The assistant can propose Jira edits for supported fields, but every edit is
+shown in the dashboard and requires an explicit confirmation before the
+existing Jira update path is called. GitHub data is read-only.
 
 Output:
 - `data/output/dashboard.html` — open this in a browser. The release picker,

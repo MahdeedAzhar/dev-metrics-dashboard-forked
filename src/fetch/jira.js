@@ -147,6 +147,51 @@ export async function updateJiraIssueField(issueKey, field, value) {
 }
 
 /**
+ * Builds a minimal Atlassian Document Format (ADF) doc wrapping plain text.
+ * Jira Cloud REST API v3 requires comment bodies in ADF, not plain strings.
+ */
+export function buildJiraCommentAdf(text) {
+  const trimmed = String(text || '').trim();
+  return {
+    type: 'doc',
+    version: 1,
+    content: [
+      {
+        type: 'paragraph',
+        content: trimmed
+          ? [{ type: 'text', text: trimmed }]
+          : [],
+      },
+    ],
+  };
+}
+
+/**
+ * Posts a comment on a Jira issue (used to record, e.g., code-review effort).
+ * The body is a plain string; it is converted to ADF for the v3 API.
+ */
+export async function postJiraComment(issueKey, body) {
+  const baseUrl = process.env.JIRA_BASE_URL;
+  if (!baseUrl) {
+    throw new Error('JIRA_BASE_URL is not set (see .env.example)');
+  }
+  const commentText = String(body || '').trim();
+  if (!commentText) {
+    throw new Error('Comment body must not be empty.');
+  }
+  const response = await fetch(`${baseUrl}/rest/api/3/issue/${encodeURIComponent(issueKey)}/comment`, {
+    method: 'POST',
+    headers: jiraHeaders(),
+    body: JSON.stringify({ body: buildJiraCommentAdf(commentText) }),
+  });
+  if (!response.ok) {
+    const responseBody = await response.text();
+    throw new Error(`Jira API ${response.status} commenting on ${issueKey}: ${responseBody}`);
+  }
+  return { key: issueKey, comment: commentText };
+}
+
+/**
  * Fetches every Jira issue belonging to any of the given fixVersions, in one JQL
  * query covering the whole set (not one call per release), paginated via
  * `nextPageToken` — the current contract for POST /rest/api/3/search/jql. The
