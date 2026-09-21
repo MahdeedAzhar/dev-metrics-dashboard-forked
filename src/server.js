@@ -1,246 +1,129 @@
+// Local development / self-hosted server. One process: generates the dashboard
+// on boot, refreshes it every minute, and serves the same routes the Vercel
+// functions in api/ expose — through the shared handlers in src/http.
 import http from 'node:http';
-import fs from 'node:fs';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { getConfig, ConfigError } from './config/index.js';
 import { generateDashboard } from './index.js';
 import { renderDashboard } from './dashboard/render.js';
-import { updateJiraIssueField } from './fetch/jira.js';
-import { getReviewLogsMap, addReviewLog, updateReviewLog, deleteReviewLog } from './reviews/service.js';
+import { readJsonBody, parseReleasesQuery } from './http/body.js';
+import { sendJson, sendHtml, sendMethodNotAllowed, sendResult } from './http/respond.js';
+import { handleTicketUpdate, handleReviews, handleAssistant, handleRefresh, errorPage } from './http/handlers.js';
 import { log, warn } from './utils/logger.js';
-import { answerAssistantQuestion, applyAssistantUpdate } from './ai/assistant.js';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const outputRoot = path.join(__dirname, '..', 'data', 'output');
-const dashboardPath = path.join(outputRoot, 'dashboard.html');
-const bundlePath = path.join(outputRoot, 'bundle.json');
+const REFRESH_INTERVAL_MS = 60 * 1000;
 
+let lastBundle = null;
 let lastDashboardHtml = '';
-let lastBundleJson = '';
-let lastGeneratedAt = null;
-
-function readIfExists(filePath) {
-  try {
-    return fs.readFileSync(filePath, 'utf8');
-  } catch {
-    return '';
-  }
-}
+let lastError = null;
 
 async function refreshData() {
   try {
     const bundle = await generateDashboard();
-    lastDashboardHtml = readIfExists(dashboardPath);
-    lastBundleJson = readIfExists(bundlePath);
-    lastGeneratedAt = bundle.generated_at;
-    log(`Live refresh complete at ${lastGeneratedAt}`);
+    lastBundle = bundle;
+    lastDashboardHtml = renderDashboard(bundle);
+    lastError = null;
+    log(`Live refresh complete at ${bundle.generated_at}`);
     return bundle;
   } catch (error) {
+    lastError = error;
     warn(`Live refresh failed: ${error.message}`);
     return null;
   }
 }
 
-function readJsonBody(req) {
-  return new Promise((resolve, reject) => {
-    let body = '';
-    req.setEncoding('utf8');
-    req.on('data', (chunk) => {
-      body += chunk;
-    });
-    req.on('end', () => {
-      if (!body) {
-        resolve({});
-        return;
-      }
-      try {
-        resolve(JSON.parse(body));
-      } catch (error) {
-        reject(error);
-      }
-    });
-    req.on('error', reject);
-  });
+async function getBundle() {
+  if (lastBundle) return lastBundle;
+  const bundle = await refreshData();
+  if (!bundle) throw lastError ?? new Error('Dashboard has not been generated yet.');
+  return bundle;
 }
 
-function escapeHtml(value) {
-  return String(value ?? '').replace(/[&<>"']/g, (character) => ({
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
-  })[character]);
+async function route(req, res) {
+  const url = new URL(req.url, 'http://localhost');
+  const { pathname } = url;
+
+  if (pathname === '/health' || pathname === '/api/health') {
+    return sendJson(res, 200, {
+      ok: true,
+      generatedAt: lastBundle?.generated_at ?? null,
+      lastError: lastError?.message ?? null,
+    });
+  }
+
+  const ticketMatch = /^\/api\/tickets\/([^/]+)$/.exec(pathname);
+  if (ticketMatch) {
+    if (req.method !== 'POST') return sendMethodNotAllowed(res, 'POST');
+    const body = await readJsonBody(req);
+    return sendResult(
+      res,
+      await handleTicketUpdate({ issueKey: decodeURIComponent(ticketMatch[1]), body, refresh: refreshData }),
+    );
+  }
+
+  if (pathname === '/api/reviews') {
+    const body = req.method === 'POST' ? await readJsonBody(req) : {};
+    const result = await handleReviews({ method: req.method, body, getBundle });
+    if (result.status === 405) return sendMethodNotAllowed(res, result.allow);
+    return sendResult(res, result);
+  }
+
+  if (pathname === '/api/assistant') {
+    if (req.method !== 'POST') return sendMethodNotAllowed(res, 'POST');
+    const body = await readJsonBody(req);
+    return sendResult(res, await handleAssistant({ body, getBundle, refresh: refreshData }));
+  }
+
+  if (pathname === '/api/refresh') {
+    if (req.method !== 'GET' && req.method !== 'POST') return sendMethodNotAllowed(res, 'GET, POST');
+    return sendResult(res, await handleRefresh({ refresh: refreshData }));
+  }
+
+  if (pathname === '/bundle.json' || pathname === '/api/bundle') {
+    return sendJson(res, 200, lastBundle ?? {});
+  }
+
+  if (pathname === '/') {
+    const releases = parseReleasesQuery(req.url);
+    if (releases.length > 0) {
+      try {
+        const bundle = await generateDashboard({ releases, writeOutput: false });
+        return sendHtml(res, 200, renderDashboard(bundle));
+      } catch (error) {
+        warn(`Failed to generate dashboard for query releases: ${error.message}`);
+        return sendHtml(res, 500, errorPage(error));
+      }
+    }
+    if (lastDashboardHtml) return sendHtml(res, 200, lastDashboardHtml);
+    if (lastError) return sendHtml(res, 500, errorPage(lastError));
+    return sendHtml(res, 200, '<p>Dashboard is still warming up — refresh in a moment.</p>');
+  }
+
+  res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+  res.end('Not found');
+  return undefined;
 }
 
 async function bootstrap() {
+  const config = getConfig();
   await refreshData();
   setInterval(() => {
     refreshData().catch(() => {});
-  }, 60 * 1000);
+  }, REFRESH_INTERVAL_MS);
 
-  const server = http.createServer(async (req, res) => {
-    if (req.url === '/health') {
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ok: true, generatedAt: lastGeneratedAt }));
-      return;
-    }
-
-    if (req.method === 'POST' && req.url.match(/^\/api\/tickets\/[^/]+$/)) {
-      try {
-        const match = req.url.match(/^\/api\/tickets\/([^/]+)$/);
-        const issueKey = decodeURIComponent(match[1]);
-        const body = await readJsonBody(req);
-        const updates = body?.updates ?? body;
-        const entries = Object.entries(updates || {});
-        if (entries.length === 0) {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: false, error: 'No Jira fields were supplied.' }));
-          return;
-        }
-
-        for (const [field, value] of entries) {
-          await updateJiraIssueField(issueKey, field, value);
-        }
-
-        const bundle = await refreshData();
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ ok: true, ticket: bundle?.tickets?.[issueKey] ?? null, updatedFields: entries.map(([field, value]) => ({ field, value })) }));
-        return;
-      } catch (error) {
-        warn(`Jira update failed: ${error.message}`);
-        res.writeHead(500, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ ok: false, error: error.message }));
-        return;
-      }
-    }
-
-    if (req.url === '/api/reviews') {
-      try {
-        if (req.method === 'GET') {
-          const logs = await getReviewLogsMap();
-          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
-          res.end(JSON.stringify({ ok: true, review_logs: logs }));
-          return;
-        }
-
-        if (req.method !== 'POST') {
-          res.writeHead(405, { Allow: 'GET, POST' });
-          res.end();
-          return;
-        }
-
-        const body = await readJsonBody(req);
-        const action = String(body.action ?? 'add').trim().toLowerCase();
-        const bundle = JSON.parse(lastBundleJson || '{}');
-
-        if (action === 'add') {
-          const result = await addReviewLog({ issueKey: body.issueKey, reviewer: body.reviewer, timeSpent: body.time_spent ?? body.timeSpent, bundle });
-          res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
-          res.end(JSON.stringify({ ok: true, ...result }));
-          return;
-        }
-
-        if (action === 'update') {
-          const result = await updateReviewLog({ issueKey: body.issueKey, logId: body.id, reviewer: body.reviewer, timeSpent: body.time_spent ?? body.timeSpent, bundle });
-          res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
-          res.end(JSON.stringify({ ok: true, ...result }));
-          return;
-        }
-
-        if (action === 'delete') {
-          const result = await deleteReviewLog({ issueKey: body.issueKey, logId: body.id, bundle });
-          res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
-          res.end(JSON.stringify({ ok: true, ...result }));
-          return;
-        }
-
-        res.writeHead(400, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
-        res.end(JSON.stringify({ ok: false, error: `Unknown review action: ${action}` }));
-        return;
-      } catch (error) {
-        res.writeHead(500, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
-        res.end(JSON.stringify({ ok: false, error: error.message }));
-      }
-      return;
-    }
-
-    if (req.method === 'POST' && req.url === '/api/assistant') {
-      try {
-        const body = await readJsonBody(req);
-        const bundle = JSON.parse(lastBundleJson || '{}');
-        if (body.confirm) {
-          const action = await applyAssistantUpdate(body.confirm, bundle, refreshData);
-          res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
-          res.end(JSON.stringify({ ok: true, action }));
-          return;
-        }
-        const result = await answerAssistantQuestion(bundle, Array.isArray(body.messages) ? body.messages : []);
-        res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
-        res.end(JSON.stringify({ ok: true, ...result }));
-      } catch (error) {
-        res.writeHead(500, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
-        res.end(JSON.stringify({ ok: false, error: error.message }));
-      }
-      return;
-    }
-
-    if (req.url === '/bundle.json') {
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(lastBundleJson || '{}');
-      return;
-    }
-
-    if (req.method === 'GET' && req.url === '/api/refresh') {
-      try {
-        const bundle = await refreshData();
-        if (!bundle) {
-          res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
-          res.end(JSON.stringify({ ok: false, error: 'Dashboard refresh failed. Check server logs.' }));
-          return;
-        }
-        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
-        res.end(JSON.stringify({ ok: true, generatedAt: bundle.generated_at }));
-      } catch (error) {
-        warn(`Dashboard refresh failed: ${error.message}`);
-        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
-        res.end(JSON.stringify({ ok: false, error: error.message }));
-      }
-      return;
-    }
-
-    const [pathOnly, queryString] = req.url.split('?');
-    if (pathOnly === '/' && queryString) {
-      const params = new URLSearchParams(queryString);
-      const releases = params.getAll('releases')
-        .flatMap(function (value) { return value.split(','); })
-        .map(function (name) { return name.trim(); })
-        .filter(function (name) { return name.length > 0; });
-
-      if (releases.length > 0) {
-        try {
-          const bundle = await generateDashboard({ releases, writeOutput: false });
-          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-          res.end(renderDashboard(bundle));
-          return;
-        } catch (error) {
-          warn(`Failed to generate dashboard for query releases: ${error.message}`);
-          res.writeHead(500, { 'Content-Type': 'text/html; charset=utf-8' });
-          res.end(`<p>Failed to load releases ${escapeHtml(releases.join(', '))}: ${escapeHtml(error.message)}</p>`);
-          return;
-        }
-      }
-    }
-
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-    res.end(lastDashboardHtml || '<p>Dashboard is still warming up...</p>');
+  const server = http.createServer((req, res) => {
+    route(req, res).catch((error) => {
+      warn(`Unhandled error on ${req.method} ${req.url}: ${error.stack ?? error.message}`);
+      if (!res.headersSent) sendJson(res, 500, { ok: false, error: error.message });
+      else res.end();
+    });
   });
 
-  const requestedPort = Number(process.env.PORT || 3000);
-  const port = Number.isInteger(requestedPort) && requestedPort > 0 ? requestedPort : 3000;
-
+  const port = config.server.port;
   server.on('error', (error) => {
     if (error.code === 'EADDRINUSE') {
       warn(`Port ${port} is already in use; trying ${port + 1}`);
       server.close(() => {
-        server.listen(port + 1, () => {
-          log(`Live dashboard server listening on http://localhost:${port + 1}`);
-        });
+        server.listen(port + 1, () => log(`Dashboard server listening on http://localhost:${port + 1}`));
       });
       return;
     }
@@ -248,13 +131,17 @@ async function bootstrap() {
   });
 
   server.listen(port, () => {
-    log(`Live dashboard server listening on http://localhost:${port}`);
+    log(`Dashboard server listening on http://localhost:${port}`);
   });
 }
 
 try {
   await bootstrap();
 } catch (error) {
-  warn(error.stack ?? error.message);
+  if (error instanceof ConfigError) {
+    warn(error.message);
+  } else {
+    warn(error.stack ?? error.message);
+  }
   process.exitCode = 1;
 }

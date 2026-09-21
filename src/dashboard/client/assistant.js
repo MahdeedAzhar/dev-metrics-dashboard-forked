@@ -116,6 +116,7 @@
     flushPara(); closeLists();
 
     // 8) Restore the opaque tokens (code blocks / charts / images / links).
+    // eslint-disable-next-line no-control-regex -- NUL is deliberately used as an opaque token delimiter
     return out.join('\n').replace(/\u0000B(\d+)\u0000/g, function (m, idx) {
       return tokens[Number(idx)] || '';
     });

@@ -30,10 +30,7 @@ test('filterTicketsBySelectedReleases matches tickets whose fix_versions interse
     'XQ-3': ticket({ key: 'XQ-3', fix_versions: [{ name: '7.0.0' }] }),
   };
   const visible = filterTicketsBySelectedReleases(ticketsByKey, ['8.5.0', '8.6.0']);
-  assert.deepEqual(
-    visible.map((t) => t.key).sort(),
-    ['XQ-1', 'XQ-2'],
-  );
+  assert.deepEqual(visible.map((t) => t.key).sort(), ['XQ-1', 'XQ-2']);
 });
 
 test('filterTicketsBySelectedReleases counts a multi-release ticket only once when both its releases are selected', () => {
@@ -72,7 +69,13 @@ test('computeReleaseSummary averages AI contribution only over tickets with a re
 test('computeReleasePointComparison totals each release and can filter to one developer', () => {
   const tickets = [
     ticket({ key: 'XQ-1', assignee_account_id: 'dev-a', sp: 3, ap: 2, fix_versions: [{ name: '8.5.0' }] }),
-    ticket({ key: 'XQ-2', assignee_account_id: 'dev-b', sp: 5, ap: 4, fix_versions: [{ name: '8.5.0' }, { name: '8.6.0' }] }),
+    ticket({
+      key: 'XQ-2',
+      assignee_account_id: 'dev-b',
+      sp: 5,
+      ap: 4,
+      fix_versions: [{ name: '8.5.0' }, { name: '8.6.0' }],
+    }),
   ];
   const all = computeReleasePointComparison(tickets, ['8.5.0', '8.6.0']);
   assert.deepEqual(all, [
@@ -101,10 +104,7 @@ test('computeDeveloperDelivery groups by assignee and sums SP/AP per developer',
 });
 
 test('computeDeveloperDelivery computes % of highest AP and % of team AP relative to the current selection', () => {
-  const tickets = [
-    ticket({ assignee_account_id: 'dev-a', ap: 40 }),
-    ticket({ assignee_account_id: 'dev-b', ap: 20 }),
-  ];
+  const tickets = [ticket({ assignee_account_id: 'dev-a', ap: 40 }), ticket({ assignee_account_id: 'dev-b', ap: 20 })];
   const rows = computeDeveloperDelivery(tickets);
   const devA = rows.find((r) => r.assignee_account_id === 'dev-a');
   const devB = rows.find((r) => r.assignee_account_id === 'dev-b');

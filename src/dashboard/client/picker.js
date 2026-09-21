@@ -4,6 +4,12 @@
 // tag just before this one in dashboard/render.js's output).
 (function () {
   var DATA = window.__DASHBOARD_DATA__;
+  // Feature flags come from server configuration (see src/config/index.js).
+  // Anything not configured for this project is hidden rather than shown empty.
+  var FEATURES = Object.assign(
+    { github: true, actualPoints: true, aiContribution: true, jiraEditing: true, reviewLogging: true, assistant: true },
+    DATA.features || {},
+  );
 
   function getReleaseNames() {
     return DATA.releases.map(function (r) { return r.name; });
@@ -206,6 +212,7 @@
     } else {
       text = value === '' ? '—' : escapeHtml(value);
     }
+    if (!FEATURES.jiraEditing) return '<td>' + text + '</td>';
     return '<td class="editable-cell" data-ticket-key="' + escapeHtml(ticket.key) + '" data-field="' + escapeHtml(field) + '" title="Click to edit">' + text + '</td>';
   }
 
@@ -441,6 +448,7 @@
   }
 
   function loadReviewLogs() {
+    if (!FEATURES.reviewLogging) return;
     fetch('/api/reviews', {
       method: 'GET',
       headers: { 'Content-Type': 'application/json' },
@@ -660,28 +668,47 @@
     container.__reviewLogBound = true;
   }
 
+  function formatDate(value) {
+    return value ? String(value).slice(0, 10) : '';
+  }
+
+  function releaseOptionHtml(r) {
+    var checked = state.selectedReleases.has(r.name) ? 'checked' : '';
+    var id = 'release-cb-' + r.name.replace(/[^a-zA-Z0-9]/g, '-');
+    var tag = '';
+    if (r.state === 'released') tag = '<span class="released-tag">released' + (r.release_date ? ' ' + formatDate(r.release_date) : '') + '</span>';
+    else if (r.state === 'upcoming') tag = '<span class="released-tag upcoming-tag">starts ' + formatDate(r.start_date) + '</span>';
+    else if (r.state === 'active') tag = r.release_date ? '<span class="released-tag active-tag">due ' + formatDate(r.release_date) + '</span>' : '<span class="released-tag active-tag">in progress</span>';
+    else if (r.state === 'unknown') tag = '<span class="released-tag warn-tag">not found in Jira</span>';
+    return (
+      '<label class="release-option" for="' + id + '"><input type="checkbox" id="' + id + '" data-release="' +
+      escapeHtml(r.name) + '" ' + checked + ' /><span>' + escapeHtml(r.name) + (tag ? ' ' + tag : '') + '</span></label>'
+    );
+  }
+
   function renderReleasePicker() {
     var el = document.getElementById('release-picker');
-    el.innerHTML = DATA.releases
-      .map(function (r) {
-        var checked = state.selectedReleases.has(r.name) ? 'checked' : '';
-        var id = 'release-cb-' + r.name.replace(/[^a-zA-Z0-9]/g, '-');
-        return (
-          '<label class="release-option" for="' +
-          id +
-          '"><input type="checkbox" id="' +
-          id +
-          '" data-release="' +
-          escapeHtml(r.name) +
-          '" ' +
-          checked +
-          ' /><span>' +
-          escapeHtml(r.name) +
-          (r.released ? ' <span class="released-tag">released</span>' : '') +
-          '</span></label>'
-        );
-      })
-      .join('');
+    if (!DATA.releases || DATA.releases.length === 0) {
+      el.innerHTML =
+        '<p class="empty-state">No releases found. Create a version (fixVersion) in Jira project ' +
+        escapeHtml(DATA.project_key || '') + ', or set JIRA_RELEASES, then refresh.</p>';
+      return;
+    }
+    var groups = [
+      { label: 'Current & upcoming', items: DATA.releases.filter(function (r) { return r.state !== 'released'; }) },
+      { label: 'Released', items: DATA.releases.filter(function (r) { return r.state === 'released'; }) },
+    ];
+    el.innerHTML =
+      '<div class="release-picker-toolbar"><span class="stat-label">Releases</span>' +
+      '<button type="button" class="inline-btn" data-release-select="all">Select all</button>' +
+      '<button type="button" class="inline-btn" data-release-select="none">Clear</button></div>' +
+      groups
+        .filter(function (g) { return g.items.length > 0; })
+        .map(function (g) {
+          return '<div class="release-group"><div class="release-group-label">' + escapeHtml(g.label) + '</div>' +
+            g.items.map(releaseOptionHtml).join('') + '</div>';
+        })
+        .join('');
 
     Array.prototype.forEach.call(el.querySelectorAll('input[type=checkbox]'), function (cb) {
       cb.addEventListener('change', function () {
@@ -691,6 +718,23 @@
         renderAll();
       });
     });
+    Array.prototype.forEach.call(el.querySelectorAll('[data-release-select]'), function (button) {
+      button.addEventListener('click', function () {
+        var all = button.getAttribute('data-release-select') === 'all';
+        state.selectedReleases = new Set(all ? getReleaseNames() : []);
+        renderReleasePicker();
+        renderAll();
+      });
+    });
+  }
+
+  function renderWarnings() {
+    var el = document.getElementById('dashboard-warnings');
+    if (!el) return;
+    var warnings = Array.isArray(DATA.warnings) ? DATA.warnings : [];
+    if (warnings.length === 0) { el.hidden = true; el.innerHTML = ''; return; }
+    el.hidden = false;
+    el.innerHTML = '<strong>Data warnings</strong><ul>' + warnings.map(function (w) { return '<li>' + escapeHtml(w) + '</li>'; }).join('') + '</ul>';
   }
 
   function renderReleaseSummary() {
@@ -708,9 +752,12 @@
       kpiTile('Completed', fmtNum(summary.completed_tickets)) +
       kpiTile('Remaining', fmtNum(summary.remaining_tickets)) +
       kpiTile('Planned SP', fmtNum(summary.total_planned_sp)) +
-      kpiTile('Delivered AP', fmtNum(summary.total_delivered_ap)) +
-      kpiTile('Team AI contribution', aiValue) +
-      '</div>';
+      (FEATURES.actualPoints ? kpiTile('Delivered AP', fmtNum(summary.total_delivered_ap)) : '') +
+      (FEATURES.aiContribution ? kpiTile('Team AI contribution', aiValue) : '') +
+      '</div>' +
+      (summary.total_tickets === 0 && state.selectedReleases.size === 0
+        ? '<p class="empty-state">Select at least one release above.</p>'
+        : '');
   }
 
   function renderReleaseProgress() {
@@ -791,6 +838,10 @@
 
   function renderPrActivityTrend() {
     var el = document.getElementById('pr-activity-trend');
+    if (!FEATURES.github) {
+      el.innerHTML = '<p class="empty-state">GitHub is not configured for this project (GITHUB_REPOS). PR metrics are unavailable.</p>';
+      return;
+    }
     var trend = buildPrActivityTrend(getVisibleTickets(), null, DATA.stale_pr_after_days);
     var chart = buildLineChart(
       [
@@ -924,7 +975,7 @@
   function renderDeveloperDelivery() {
     var el = document.getElementById('developer-delivery');
     var rows = computeDeveloperDelivery(getVisibleTickets()).sort(function (a, b) {
-      return b.delivered_ap - a.delivered_ap;
+      return FEATURES.actualPoints ? b.delivered_ap - a.delivered_ap : b.planned_sp - a.planned_sp;
     });
 
     var body = rows
@@ -938,30 +989,30 @@
           r.ticket_count +
           '</td><td>' +
           fmtNum(r.planned_sp) +
-          '</td><td>' +
-          fmtNum(r.delivered_ap) +
-          '</td><td>' +
-          (r.percent_of_highest_ap == null ? '—' : fmtPercent(r.percent_of_highest_ap)) +
-          '</td><td>' +
-          (r.percent_of_team_ap == null ? '—' : fmtPercent(r.percent_of_team_ap)) +
-          '</td><td>' +
-          (r.ai_contribution_percent == null
-            ? '—'
-            : fmtPercent(r.ai_contribution_percent) +
-              ' <span class="coverage-note">(' +
-              r.ai_contribution_coverage +
-              '/' +
-              r.ticket_count +
-              ')</span>') +
-          '</td></tr>'
+          '</td>' +
+          (FEATURES.actualPoints
+            ? '<td>' + fmtNum(r.delivered_ap) + '</td><td>' +
+              (r.percent_of_highest_ap == null ? '—' : fmtPercent(r.percent_of_highest_ap)) + '</td><td>' +
+              (r.percent_of_team_ap == null ? '—' : fmtPercent(r.percent_of_team_ap)) + '</td>'
+            : '') +
+          (FEATURES.aiContribution
+            ? '<td>' +
+              (r.ai_contribution_percent == null
+                ? '—'
+                : fmtPercent(r.ai_contribution_percent) +
+                  ' <span class="coverage-note">(' + r.ai_contribution_coverage + '/' + r.ticket_count + ')</span>') +
+              '</td>'
+            : '') +
+          '</tr>'
         );
       })
       .join('');
 
     el.innerHTML =
       '<table class="data-table" id="developer-delivery-table"><thead><tr>' +
-      '<th>Developer</th><th>Tickets</th><th>Planned SP</th><th>Delivered AP</th>' +
-      '<th>% of Highest AP</th><th>% of Team AP</th><th>AI Contribution</th>' +
+      '<th>Developer</th><th>Tickets</th><th>Planned SP</th>' +
+      (FEATURES.actualPoints ? '<th>Delivered AP</th><th>% of Highest AP</th><th>% of Team AP</th>' : '') +
+      (FEATURES.aiContribution ? '<th>AI Contribution</th>' : '') +
       '</tr></thead><tbody>' +
       (body || '<tr><td colspan="7" class="empty-state">No tickets in the selected release(s).</td></tr>') +
       '</tbody></table>';
@@ -1001,10 +1052,14 @@
       '<div class="dev-summary-stats">' +
       statPair('Tickets', devRow.ticket_count) +
       statPair('Planned SP', fmtNum(devRow.planned_sp)) +
-      statPair('Delivered AP', fmtNum(devRow.delivered_ap)) +
-      statPair('% of Highest AP', devRow.percent_of_highest_ap == null ? '—' : fmtPercent(devRow.percent_of_highest_ap)) +
-      statPair('% of Team AP', devRow.percent_of_team_ap == null ? '—' : fmtPercent(devRow.percent_of_team_ap)) +
-      statPair('AI Contribution', devRow.ai_contribution_percent == null ? '—' : fmtPercent(devRow.ai_contribution_percent)) +
+      (FEATURES.actualPoints
+        ? statPair('Delivered AP', fmtNum(devRow.delivered_ap)) +
+          statPair('% of Highest AP', devRow.percent_of_highest_ap == null ? '—' : fmtPercent(devRow.percent_of_highest_ap)) +
+          statPair('% of Team AP', devRow.percent_of_team_ap == null ? '—' : fmtPercent(devRow.percent_of_team_ap))
+        : '') +
+      (FEATURES.aiContribution
+        ? statPair('AI Contribution', devRow.ai_contribution_percent == null ? '—' : fmtPercent(devRow.ai_contribution_percent))
+        : '') +
       '</div>';
 
     var ticketRows = tickets
@@ -1020,13 +1075,11 @@
           escapeHtml(t.status) +
           '</td><td>' +
           (t.sp == null ? '—' : t.sp) +
-          '</td><td>' +
-          (t.ap == null ? '—' : t.ap) +
-          '</td><td>' +
-          (t.ai_contribution_percent == null ? '—' : fmtPercent(t.ai_contribution_percent)) +
-          '</td><td>' +
-          prLinksHtml(t) +
-          '</td></tr>'
+          '</td>' +
+          (FEATURES.actualPoints ? '<td>' + (t.ap == null ? '—' : t.ap) + '</td>' : '') +
+          (FEATURES.aiContribution ? '<td>' + (t.ai_contribution_percent == null ? '—' : fmtPercent(t.ai_contribution_percent)) + '</td>' : '') +
+          (FEATURES.github ? '<td>' + prLinksHtml(t) + '</td>' : '') +
+          '</tr>'
         );
       })
       .join('');
@@ -1035,9 +1088,10 @@
     var timelineChart = buildLineChart(
       [
         { name: 'Tickets completed', points: timeline.tickets_completed_by_day },
+      ].concat(FEATURES.github ? [
         { name: 'PRs opened', points: timeline.pr_opened_by_day },
         { name: 'PRs merged', points: timeline.pr_merged_by_day },
-      ],
+      ] : []),
       { ariaLabel: 'Developer activity timeline', height: 200 },
     );
 
@@ -1048,7 +1102,11 @@
       summaryHtml +
       '<h4 class="timeline-label">Activity over time (personal — not a comparison against anyone else)</h4>' +
       timelineChart +
-      '<table class="data-table"><thead><tr><th>Jira</th><th>Summary</th><th>Status</th><th>SP</th><th>AP</th><th>AI Contribution</th><th>PR(s)</th></tr></thead><tbody>' +
+      '<table class="data-table"><thead><tr><th>Jira</th><th>Summary</th><th>Status</th><th>SP</th>' +
+      (FEATURES.actualPoints ? '<th>AP</th>' : '') +
+      (FEATURES.aiContribution ? '<th>AI Contribution</th>' : '') +
+      (FEATURES.github ? '<th>PR(s)</th>' : '') +
+      '</tr></thead><tbody>' +
       ticketRows +
       '</tbody></table>';
   }
@@ -1121,9 +1179,11 @@
     var head =
       '<tr><th>Jira</th><th>Issue Type</th><th>Summary</th><th>Assignee</th><th>Status</th>' +
       sortHeader('sp', 'SP') +
-      sortHeader('ap', 'AP') +
-      sortHeader('ai_contribution_percent', 'AI Contribution') +
-      '<th>PR(s)</th><th>Code Review</th></tr>';
+      (FEATURES.actualPoints ? sortHeader('ap', 'AP') : '') +
+      (FEATURES.aiContribution ? sortHeader('ai_contribution_percent', 'AI Contribution') : '') +
+      (FEATURES.github ? '<th>PR(s)</th>' : '') +
+      (FEATURES.reviewLogging ? '<th>Code Review</th>' : '') +
+      '</tr>';
 
     var body = tickets
       .map(function (t) {
@@ -1139,10 +1199,10 @@
           renderEditableCell(t, 'assignee') +
           renderEditableCell(t, 'status') +
           renderEditableCell(t, 'sp') +
-          renderEditableCell(t, 'ap') +
-          renderEditableCell(t, 'ai_contribution_percent') +
-          '<td>' + prLinksHtml(t) + '</td>' +
-          renderReviewLogsColumn(t) +
+          (FEATURES.actualPoints ? renderEditableCell(t, 'ap') : '') +
+          (FEATURES.aiContribution ? renderEditableCell(t, 'ai_contribution_percent') : '') +
+          (FEATURES.github ? '<td>' + prLinksHtml(t) + '</td>' : '') +
+          (FEATURES.reviewLogging ? renderReviewLogsColumn(t) : '') +
           '</tr>'
         );
       })
@@ -1153,7 +1213,9 @@
       '<div class="table-scroll-container"><table class="data-table" id="all-tickets-table"><thead>' +
       head +
       '</thead><tbody>' +
-      (body || '<tr><td colspan="10" class="empty-state">No tickets match the current filters.</td></tr>') +
+      (body || '<tr><td colspan="10" class="empty-state">' +
+        (visible.length === 0 ? 'No tickets in the selected release(s).' : 'No tickets match the current filters.') +
+        '</td></tr>') +
       '</tbody></table></div>';
 
     el.querySelector('#filter-status').addEventListener('change', function (e) {
@@ -1187,6 +1249,7 @@
   }
 
   function renderAll() {
+    renderWarnings();
     renderReleaseSummary();
     renderReleasePointComparison();
     renderReleaseProgress();

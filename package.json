@@ -1,18 +1,35 @@
 {
   "name": "dev-metrics-dashboard",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "private": true,
-  "description": "PR velocity and AI-contribution dashboard for the Xiangqi dev team",
+  "description": "Engineering delivery and AI-contribution dashboard for Jira + GitHub teams",
   "type": "module",
   "engines": {
     "node": ">=20"
   },
   "scripts": {
-    "start": "node --env-file=.env src/index.js",
-    "live": "node --env-file=.env src/server.js",
-    "test": "node --test"
+    "check": "node --env-file-if-exists=.env scripts/checkConfig.js",
+    "jira:fields": "node --env-file-if-exists=.env scripts/discoverJiraFields.js",
+    "dev": "node --env-file-if-exists=.env --watch src/server.js",
+    "start": "node --env-file-if-exists=.env src/server.js",
+    "generate": "node --env-file-if-exists=.env src/index.js",
+    "build": "npm run lint && npm test && npm run generate",
+    "test": "node --test",
+    "test:watch": "node --test --watch",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "cache:clear": "node --env-file-if-exists=.env scripts/clearCache.js",
+    "validate:sheet": "node --env-file-if-exists=.env scripts/validateAgainstSheet.js"
   },
   "dependencies": {
     "@vercel/blob": "^2.8.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.0.0",
+    "eslint": "^9.0.0",
+    "globals": "^15.0.0",
+    "prettier": "^3.0.0"
   }
 }

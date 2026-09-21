@@ -1,23 +1,12 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { escapeHtml } from '../utils/escapeHtml.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 function readClientScript(name) {
   return fs.readFileSync(path.join(__dirname, 'client', name), 'utf8');
-}
-
-function escapeHtml(value) {
-  return String(value ?? '').replace(/[&<>"']/g, (ch) =>
-    ({
-      '&': '&amp;',
-      '<': '&lt;',
-      '>': '&gt;',
-      '"': '&quot;',
-      "'": '&#39;',
-    })[ch],
-  );
 }
 
 /**
@@ -31,20 +20,63 @@ function escapeHtml(value) {
  * containers.
  */
 export function renderDashboard(bundle) {
-  const { generated_at: generatedAt, releases, tickets, stale_pr_after_days: stalePrAfterDays, default_selected_releases: defaultSelectedReleases = [] } = bundle;
+  const {
+    generated_at: generatedAt,
+    releases,
+    tickets,
+    stale_pr_after_days: stalePrAfterDays,
+    default_selected_releases: defaultSelectedReleases = [],
+    features = {},
+    project_name: projectName = 'Engineering Delivery',
+    project_key: projectKey = '',
+    warnings = [],
+  } = bundle;
   const deliveryMathSource = readClientScript('deliveryMath.js');
   const timeSeriesSource = readClientScript('timeSeries.js');
   const chartsSource = readClientScript('charts.js');
   const pickerSource = readClientScript('picker.js');
-  const assistantSource = readClientScript('assistant.js');
-  const dataJson = JSON.stringify({ releases, tickets, stale_pr_after_days: stalePrAfterDays, default_selected_releases: defaultSelectedReleases }).replaceAll('<', '\u003c');
+  const assistantSource = features.assistant === false ? '' : readClientScript('assistant.js');
+  // Only non-secret data is embedded; see publicConfig() in src/config/index.js.
+  const dataJson = JSON.stringify({
+    releases,
+    tickets,
+    stale_pr_after_days: stalePrAfterDays,
+    default_selected_releases: defaultSelectedReleases,
+    features,
+    project_name: projectName,
+    project_key: projectKey,
+    warnings,
+  }).replaceAll('<', '\u003c');
+  const title = `${escapeHtml(projectName)} · Delivery &amp; AI Insights`;
+  const githubEnabled = features.github !== false;
+  const aiEnabled = features.aiContribution !== false;
+  const assistantMarkup =
+    features.assistant === false
+      ? ''
+      : `<button id="assistant-launcher" class="assistant-launcher" type="button" aria-haspopup="dialog" aria-controls="assistant-modal">Ask assistant</button>
+  <div id="assistant-modal" class="modal-backdrop assistant-modal" role="dialog" aria-modal="true" aria-labelledby="assistant-modal-title" hidden>
+    <div class="modal-card assistant-modal-card">
+      <div class="assistant-modal-header">
+        <h2 id="assistant-modal-title">Engineering data assistant</h2>
+        <button id="assistant-close" class="assistant-close" type="button" aria-label="Close assistant">&times;</button>
+      </div>
+      <div class="assistant-panel">
+        <div id="assistant-messages" class="assistant-messages"></div>
+        <div id="assistant-confirmation" class="assistant-confirmation" hidden></div>
+        <form id="assistant-form" class="assistant-form">
+          <input id="assistant-input" type="text" autocomplete="off" placeholder="Ask about releases, tickets, points, PRs, or Jira updates" />
+          <button id="assistant-send" class="refresh-button" type="submit">Ask</button>
+        </form>
+      </div>
+    </div>
+  </div>`;
 
   return `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Engineering Delivery &amp; AI Insights Dashboard</title>
+<title>${title}</title>
 <style>
     :root {
     color-scheme: light;
@@ -149,6 +181,15 @@ export function renderDashboard(bundle) {
   .hero-sub { margin-top: 10px; }
   .dashboard-header .meta { margin-top: 6px; }
   .section { margin-bottom: 40px; animation: sectionReveal 0.5s ease both; }
+  .section[hidden] { display: none; }
+  .warnings-banner { background: #fff7e6; border: 1px solid #f0c36d; border-radius: 10px; padding: 12px 16px; margin: 0 0 24px; font-size: 13px; }
+  .warnings-banner ul { margin: 6px 0 0; padding-left: 18px; }
+  .release-picker-toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+  .release-group { margin-bottom: 8px; }
+  .release-group-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted); margin: 6px 0 4px; }
+  .released-tag.active-tag { background: #e6f4ea; color: #1e6b3a; }
+  .released-tag.upcoming-tag { background: #eef2ff; color: #3b4fb8; }
+  .released-tag.warn-tag { background: #fdecea; color: #a12622; }
   @keyframes sectionReveal { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
   .section:nth-child(even) { animation-delay: 0.05s; }
   h2 { font-size: 17px; font-weight: 650; margin: 0 0 16px; }
@@ -212,7 +253,7 @@ export function renderDashboard(bundle) {
   }
   .release-option:hover { background: var(--surface-3); }
   .release-option input { width: 16px; height: 16px; cursor: pointer; accent-color: var(--series-1); }
-  .released-tag { font-size: 10px; font-weight: 600; color: var(--text-muted); text-transform: uppercase; }
+  .released-tag { font-size: 10px; font-weight: 600; color: var(--text-muted); text-transform: uppercase; padding: 1px 6px; border-radius: 999px; background: var(--surface-3); }
 
   .dev-summary-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 16px; margin-bottom: 20px; }
   .dev-summary-stats .stat-label { display: block; color: var(--text-secondary); font-size: 11px; }
@@ -536,7 +577,7 @@ export function renderDashboard(bundle) {
 <div class="wrap">
   <header class="dashboard-header">
     <div class="hero-copy">
-      <h1>Engineering Delivery &amp; AI Insights</h1>
+      <h1>${escapeHtml(projectName)} · Delivery${aiEnabled ? ' &amp; AI Insights' : ' Insights'}</h1>
       <p class="meta hero-sub">Generated ${escapeHtml(generatedAt.slice(0, 16)).replace('T', ' ')} UTC · Select release(s) below — everything recalculates instantly, nothing here is a performance score.</p>
     </div>
     <div class="dashboard-actions">
@@ -545,23 +586,9 @@ export function renderDashboard(bundle) {
     </div>
   </header>
 
-  <button id="assistant-launcher" class="assistant-launcher" type="button" aria-haspopup="dialog" aria-controls="assistant-modal">Ask assistant</button>
-  <div id="assistant-modal" class="modal-backdrop assistant-modal" role="dialog" aria-modal="true" aria-labelledby="assistant-modal-title" hidden>
-    <div class="modal-card assistant-modal-card">
-      <div class="assistant-modal-header">
-        <h2 id="assistant-modal-title">Engineering data assistant</h2>
-        <button id="assistant-close" class="assistant-close" type="button" aria-label="Close assistant">&times;</button>
-      </div>
-      <div class="assistant-panel">
-        <div id="assistant-messages" class="assistant-messages"></div>
-        <div id="assistant-confirmation" class="assistant-confirmation" hidden></div>
-        <form id="assistant-form" class="assistant-form">
-          <input id="assistant-input" type="text" autocomplete="off" placeholder="Ask about releases, tickets, points, PRs, or Jira updates" />
-          <button id="assistant-send" class="refresh-button" type="submit">Ask</button>
-        </form>
-      </div>
-    </div>
-  </div>
+  <div id="dashboard-warnings" class="warnings-banner" hidden></div>
+
+  ${assistantMarkup}
 
   <div class="section">
     <div id="release-picker" class="release-picker"></div>
@@ -601,7 +628,7 @@ export function renderDashboard(bundle) {
     <div id="engineering-activity-trend"></div>
   </div>
 
-  <div class="section">
+  <div class="section"${githubEnabled ? '' : ' hidden'}>
     <h2>7. PR Activity Trend</h2>
     <div id="pr-activity-trend"></div>
   </div>

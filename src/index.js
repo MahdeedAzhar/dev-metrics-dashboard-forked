@@ -1,12 +1,14 @@
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { repos, lookbackDays, releasesToTrack, stalePrAfterDays } from '../config/config.js';
+import { getConfig, publicConfig } from './config/index.js';
 import { fetchNewOrUpdatedPullRequests, fetchPullRequestActivity } from './fetch/github.js';
 import { fetchTicketsByFixVersions } from './fetch/jira.js';
 import { fetchTicketChangelog } from './fetch/jiraChangelog.js';
+import { resolveReleases } from './fetch/jiraVersions.js';
 import { extractTicketId } from './parse/ticketId.js';
 import { parseAiChecklist, combineAiSignals } from './parse/aiChecklist.js';
 import { computeCommitAiPercent } from './parse/commitCoAuthorship.js';
+import { summarizePrReviews } from './parse/prReviews.js';
 import { buildTicketPrIndex } from './merge/ticketPrIndex.js';
 import { normalizeJiraIssue } from './normalize/ticketRecord.js';
 import { renderDashboard } from './dashboard/render.js';
@@ -30,8 +32,26 @@ function parseArgs(argv) {
   return args;
 }
 
-function buildPrRecord(repo, rawPr, activity) {
-  const { ticketId, source } = extractTicketId(rawPr.title, rawPr.body);
+/**
+ * The cached record for one pull request: identity, linkage to a Jira ticket,
+ * AI-contribution signals and code-review timing. Exported for tests.
+ */
+export function buildPrRecord(repo, rawPr, activity, config = getConfig()) {
+  const { ticketId, source } = extractTicketId(rawPr.title, rawPr.body, { projectKey: config.jira.projectKey });
+  const aiEnabled = config.aiContribution.enabled;
+  const aiContribution = aiEnabled
+    ? combineAiSignals(
+        parseAiChecklist(rawPr.body, { heading: config.aiContribution.checklistHeading }),
+        computeCommitAiPercent(activity.commits, config.aiContribution.coAuthorPatterns),
+      )
+    : {
+        available: false,
+        overall_score_percent: null,
+        source: 'disabled',
+        activities: [],
+        checklist_score_percent: null,
+        commit_ai_percent: null,
+      };
 
   return {
     id: `${repo}#${rawPr.number}`,
@@ -42,15 +62,18 @@ function buildPrRecord(repo, rawPr, activity) {
     created_at: rawPr.created_at,
     merged_at: rawPr.merged_at,
     updated_at: rawPr.updated_at,
+    base_branch: rawPr.base?.ref ?? null,
+    author_login: rawPr.user?.login ?? null,
+    assignee_login: rawPr.assignee?.login ?? null,
     linked_ticket_id: ticketId,
     ticket_source: source,
-    ai_contribution: combineAiSignals(parseAiChecklist(rawPr.body), computeCommitAiPercent(activity.commits)),
-    assignee_login: rawPr.assignee?.login ?? null,
+    ai_contribution: aiContribution,
+    review: summarizePrReviews(rawPr, activity.reviews, activity.comments),
     fetched_at: new Date().toISOString(),
   };
 }
 
-async function syncRepo(repo, lookbackCutoffIso) {
+async function syncRepo(repo, lookbackCutoffIso, config) {
   const cache = readGithubCache(repo);
   const watermark = readWatermark(repo);
   const nowIso = new Date().toISOString();
@@ -59,16 +82,15 @@ async function syncRepo(repo, lookbackCutoffIso) {
   // instead of paging through the repo's entire PR history.
   const effectiveWatermark = watermark.lastUpdatedAtSeen ?? lookbackCutoffIso;
 
-  const newRawPrs = await fetchNewOrUpdatedPullRequests(repo, effectiveWatermark);
+  const newRawPrs = await fetchNewOrUpdatedPullRequests(repo, effectiveWatermark, config);
   log(`${repo}: ${newRawPrs.length} new/updated PR(s) since ${effectiveWatermark}`);
 
   let maxUpdatedAt = watermark.lastUpdatedAtSeen;
 
   for (let i = 0; i < newRawPrs.length; i += 1) {
     const rawPr = newRawPrs[i];
-    // eslint-disable-next-line no-await-in-loop
-    const activity = await fetchPullRequestActivity(repo, rawPr.number);
-    cache[rawPr.number] = buildPrRecord(repo, rawPr, activity);
+    const activity = await fetchPullRequestActivity(repo, rawPr.number, config);
+    cache[rawPr.number] = buildPrRecord(repo, rawPr, activity, config);
     if (!maxUpdatedAt || new Date(rawPr.updated_at) > new Date(maxUpdatedAt)) {
       maxUpdatedAt = rawPr.updated_at;
     }
@@ -90,24 +112,49 @@ async function syncRepo(repo, lookbackCutoffIso) {
 }
 
 /**
+ * Syncs every configured repository. A single repository failing (bad name,
+ * revoked access) is reported and skipped so the Jira half of the dashboard
+ * still renders; the failure is recorded in the bundle's `warnings`.
+ */
+async function syncAllRepos(config, warnings) {
+  const lookbackStart = new Date(Date.now() - config.github.lookbackDays * 24 * 60 * 60 * 1000).toISOString();
+  const allPrRecords = [];
+  for (const repo of config.github.repos) {
+    try {
+      allPrRecords.push(...(await syncRepo(repo, lookbackStart, config)));
+    } catch (error) {
+      // Keep whatever was cached so a token hiccup degrades to "stale PR
+      // evidence" rather than "no PR evidence".
+      const cached = Object.values(readGithubCache(repo));
+      allPrRecords.push(...cached);
+      warn(`GitHub sync failed for ${repo}: ${error.message}`);
+      warnings.push(
+        `GitHub: could not sync ${repo} (${error.message}). ` +
+          (cached.length ? `Showing ${cached.length} previously cached PR(s).` : 'No cached PRs available.'),
+      );
+    }
+  }
+  return allPrRecords;
+}
+
+/**
  * Fetches each ticket's status-change history, needed for the In Progress ->
  * Code Review cycle-time metric. Unlike the ticket fields (one cheap bulk JQL
  * call regardless of ticket count), changelog is ~1 API call per ticket, so
  * it's cached per-ticket keyed by that ticket's own Jira `updated` timestamp —
  * `updated` changes on any field edit, not just a status transition, so this
- * is a conservative invalidation key that never under-fetches (it may refetch
- * a changelog whose status history didn't actually change, but never skips a
- * refetch that was needed).
+ * is a conservative invalidation key that never under-fetches.
  */
-async function syncChangelogs(rawIssues) {
+async function syncChangelogs(rawIssues, config) {
   const cache = readJiraChangelogsCache();
   const toFetch = rawIssues.filter((issue) => cache[issue.key]?.cachedForUpdated !== issue.fields.updated);
-  log(`Changelogs: ${toFetch.length} ticket(s) need (re)fetching, ${rawIssues.length - toFetch.length} unchanged since last cache`);
+  log(
+    `Changelogs: ${toFetch.length} ticket(s) need (re)fetching, ${rawIssues.length - toFetch.length} unchanged since last cache`,
+  );
 
   for (let i = 0; i < toFetch.length; i += 1) {
     const issue = toFetch[i];
-    // eslint-disable-next-line no-await-in-loop
-    const values = await fetchTicketChangelog(issue.key);
+    const values = await fetchTicketChangelog(issue.key, config);
     cache[issue.key] = { cachedForUpdated: issue.fields.updated, values };
     writeJiraChangelogsCache(cache);
     if ((i + 1) % 10 === 0 || i === toFetch.length - 1) {
@@ -122,64 +169,51 @@ async function syncChangelogs(rawIssues) {
   return changelogByKey;
 }
 
-/** First-seen fixVersion metadata for each configured release, plus any configured release with 0 matched tickets (still listed so the picker shows it). */
-function buildReleaseMeta(ticketsByKey, releases) {
-  const seen = new Map();
-  for (const ticket of Object.values(ticketsByKey)) {
-    for (const fv of ticket.fix_versions) {
-      if (releases.includes(fv.name) && !seen.has(fv.name)) {
-        seen.set(fv.name, { name: fv.name, released: fv.released, release_date: fv.release_date });
-      }
-    }
-  }
-  for (const name of releases) {
-    if (!seen.has(name)) seen.set(name, { name, released: null, release_date: null });
-  }
-  return [...seen.values()];
-}
-
-export async function generateDashboard({ releases: overrideReleases = null, writeOutput: shouldWriteOutput = true } = {}) {
+/**
+ * Generates the dashboard bundle: `{ generated_at, project, features, releases,
+ * tickets, warnings, ... }`. Everything the browser needs, and nothing secret.
+ *
+ * @param {object} options
+ * @param {string[]|null} options.releases  explicit release names (overrides discovery)
+ * @param {boolean} options.writeOutput     also write data/output/{bundle.json,dashboard.html}
+ */
+export async function generateDashboard({
+  releases: overrideReleases = null,
+  writeOutput: shouldWriteOutput = true,
+} = {}) {
+  const config = getConfig();
   const now = new Date();
-  const lookbackStart = new Date(now.getTime() - lookbackDays * 24 * 60 * 60 * 1000).toISOString();
-  const releases = overrideReleases ? overrideReleases : releasesToTrack;
+  const warnings = [];
 
-  const allPrRecords = [];
-  for (const repo of repos) {
-    // eslint-disable-next-line no-await-in-loop
-    const prs = await syncRepo(repo, lookbackStart);
-    allPrRecords.push(...prs);
+  const releases = await resolveReleases({ override: overrideReleases, config, now });
+  const releaseNames = releases.map((r) => r.name);
+  if (releaseNames.length === 0) {
+    warnings.push(
+      `Jira: no releases found for project ${config.jira.projectKey}. Create a version (fixVersion) in Jira or set JIRA_RELEASES.`,
+    );
   }
 
-  log(`Fetching Jira tickets for release(s): ${releases.join(', ')}`);
-  let rawIssues = [];
-  try {
-    rawIssues = await fetchTicketsByFixVersions(releases);
-  } catch (error) {
-    warn(`Jira fetch failed: ${error.message}`);
-    throw error;
-  }
+  const allPrRecords = config.features.github ? await syncAllRepos(config, warnings) : [];
+
+  log(`Fetching Jira tickets for release(s): ${releaseNames.join(', ') || '(none)'}`);
+  const rawIssues = await fetchTicketsByFixVersions(releaseNames, config);
   log(`Found ${rawIssues.length} ticket(s) across the configured release(s)`);
 
   const ticketPrIndex = buildTicketPrIndex(allPrRecords);
-  const changelogByKey = await syncChangelogs(rawIssues);
-  const jiraBaseUrl = process.env.JIRA_BASE_URL;
+  const changelogByKey = await syncChangelogs(rawIssues, config);
 
   const ticketsByKey = {};
   for (const issue of rawIssues) {
-    ticketsByKey[issue.key] = normalizeJiraIssue(issue, ticketPrIndex, jiraBaseUrl, changelogByKey);
+    ticketsByKey[issue.key] = normalizeJiraIssue(issue, ticketPrIndex, changelogByKey, config);
   }
   writeJiraTicketsCache(ticketsByKey);
 
-  const defaultSelectedReleases = process.env.DEFAULT_RELEASES
-    ? process.env.DEFAULT_RELEASES.split(',').map((name) => name.trim()).filter(Boolean)
-    : [];
-
   const bundle = {
     generated_at: now.toISOString(),
-    releases: buildReleaseMeta(ticketsByKey, releases),
+    ...publicConfig(config),
+    releases,
     tickets: ticketsByKey,
-    stale_pr_after_days: stalePrAfterDays,
-    default_selected_releases: defaultSelectedReleases,
+    warnings,
   };
 
   if (shouldWriteOutput) {
@@ -192,7 +226,12 @@ export async function generateDashboard({ releases: overrideReleases = null, wri
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
-  const releases = args.releases ? args.releases.split(',').map((r) => r.trim()) : null;
+  const releases = args.releases
+    ? args.releases
+        .split(',')
+        .map((r) => r.trim())
+        .filter(Boolean)
+    : null;
   await generateDashboard({ releases });
 }
 

@@ -11,6 +11,9 @@ process.env.BLOB_READ_WRITE_TOKEN = '';
 process.env.JIRA_BASE_URL = 'https://example.atlassian.net';
 process.env.JIRA_EMAIL = 'test@example.com';
 process.env.JIRA_API_TOKEN = 'test-token';
+process.env.JIRA_PROJECT_KEY = 'XQ';
+process.env.JIRA_STORY_POINTS_FIELD = 'customfield_10010';
+process.env.GITHUB_REPOS = '';
 
 import {
   addReviewLog,
@@ -34,7 +37,13 @@ function installFetchStub() {
   const calls = [];
   const stub = mock.method(globalThis, 'fetch', async (url, options) => {
     calls.push({ url, options });
-    return { ok: true, status: 201, async text() { return '{}'; } };
+    return {
+      ok: true,
+      status: 201,
+      async text() {
+        return '{}';
+      },
+    };
   });
   return { stub, calls };
 }
@@ -75,7 +84,13 @@ test('updateReviewLog edits the log and posts an update comment', async () => {
     const added = await addReviewLog({ issueKey: 'XQ-3', reviewer: 'Alice', timeSpent: '2h', bundle: makeBundle() });
     calls.length = 0;
 
-    const updated = await updateReviewLog({ issueKey: 'XQ-3', logId: added.log.id, reviewer: 'Alice', timeSpent: '3h', bundle: makeBundle() });
+    const updated = await updateReviewLog({
+      issueKey: 'XQ-3',
+      logId: added.log.id,
+      reviewer: 'Alice',
+      timeSpent: '3h',
+      bundle: makeBundle(),
+    });
     assert.equal(updated.log.time_spent, '3h');
     assert.equal(updated.log.comment, 'Alice spent 3h on code review');
     assert.ok(updated.log.updated_at);

@@ -1,36 +1,39 @@
 import { timingSafeEqual } from 'node:crypto';
+import { getConfig } from '../src/config/index.js';
 
-function credentialsConfigured() {
-  return Boolean(process.env.DASHBOARD_USERNAME && process.env.DASHBOARD_PASSWORD);
+function credentials() {
+  const { dashboardUsername, dashboardPassword } = getConfig().server;
+  return dashboardUsername && dashboardPassword ? { dashboardUsername, dashboardPassword } : null;
 }
 
-function matchesExpectedCredentials(header) {
+function matchesExpectedCredentials(header, creds) {
   if (!header?.startsWith('Basic ')) return false;
 
   const supplied = Buffer.from(header.slice(6), 'base64').toString('utf8');
-  const expected = `${process.env.DASHBOARD_USERNAME}:${process.env.DASHBOARD_PASSWORD}`;
+  const expected = `${creds.dashboardUsername}:${creds.dashboardPassword}`;
   const suppliedBuffer = Buffer.from(supplied);
   const expectedBuffer = Buffer.from(expected);
 
-  return suppliedBuffer.length === expectedBuffer.length
-    && timingSafeEqual(suppliedBuffer, expectedBuffer);
+  return suppliedBuffer.length === expectedBuffer.length && timingSafeEqual(suppliedBuffer, expectedBuffer);
 }
 
 export function isDashboardAuthorized(req) {
-  return credentialsConfigured()
-    ? matchesExpectedCredentials(req.headers.authorization)
-    : !process.env.VERCEL;
+  const creds = credentials();
+  return creds ? matchesExpectedCredentials(req.headers.authorization, creds) : !getConfig().server.isVercel;
 }
 
 /**
- * Keep the public Vercel deployment private by default. Locally, credentials
- * are optional so `npm run live` remains convenient.
+ * Keeps a public deployment private by default: on Vercel, DASHBOARD_USERNAME /
+ * DASHBOARD_PASSWORD are mandatory and every route (including the Jira write
+ * API) sits behind HTTP Basic Auth. Locally, credentials are optional so
+ * `npm run dev` stays convenient.
  */
 export function requireDashboardAuth(req, res) {
-  if (!credentialsConfigured()) {
-    if (!process.env.VERCEL) return true;
+  const creds = credentials();
+  if (!creds) {
+    if (!getConfig().server.isVercel) return true;
     res.writeHead(503, { 'Content-Type': 'application/json; charset=utf-8' });
-    res.end(JSON.stringify({ error: 'Set DASHBOARD_USERNAME and DASHBOARD_PASSWORD in Vercel.' }));
+    res.end(JSON.stringify({ error: 'Set DASHBOARD_USERNAME and DASHBOARD_PASSWORD in the deployment environment.' }));
     return false;
   }
 
@@ -38,7 +41,7 @@ export function requireDashboardAuth(req, res) {
 
   res.writeHead(401, {
     'Content-Type': 'text/plain; charset=utf-8',
-    'WWW-Authenticate': 'Basic realm="Engineering Delivery Dashboard"',
+    'WWW-Authenticate': 'Basic realm="Dev Metrics Dashboard"',
   });
   res.end('Authentication required.');
   return false;

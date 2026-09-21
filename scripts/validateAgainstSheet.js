@@ -2,13 +2,14 @@
 // tool's own Jira-fetched data for a release, as the trust gate before treating
 // the automated dashboard as a replacement for the sheet.
 //
-// Usage: node --env-file=.env scripts/validateAgainstSheet.js --csv <path> --release "8.6.0" [--json]
+// Usage: npm run validate:sheet -- --csv <path> --release "1.2.0" [--json]
 //
 // Runs the *same* fetch/jira.js + normalize/ticketRecord.js + deliveryMath code
 // path the dashboard itself uses (not a reimplementation) — a mismatch here
 // means real data disagreement, not two independently-buggy implementations
 // happening to agree.
 import fs from 'node:fs';
+import { getConfig } from '../src/config/index.js';
 import { fetchTicketsByFixVersions } from '../src/fetch/jira.js';
 import { normalizeJiraIssue } from '../src/normalize/ticketRecord.js';
 import { computeDeveloperDelivery } from '../src/dashboard/client/deliveryMathNode.js';
@@ -230,9 +231,7 @@ function compareDeveloperTotals(sheetRows, toolTickets) {
 }
 
 function compareReleaseMembership(sheetRows, toolTickets, release) {
-  const toolMismatches = toolTickets
-    .filter((t) => !t.fix_versions.some((v) => v.name === release))
-    .map((t) => t.key);
+  const toolMismatches = toolTickets.filter((t) => !t.fix_versions.some((v) => v.name === release)).map((t) => t.key);
   const sheetMismatches = sheetRows.filter((r) => !r.fixVersions.includes(release)).map((r) => r.key);
   return {
     status: toolMismatches.length === 0 && sheetMismatches.length === 0 ? 'PASS' : 'FAIL',
@@ -266,8 +265,8 @@ async function main() {
 
   log(`Fetching Jira tickets for release "${args.release}" via the tool's own pipeline...`);
   const rawIssues = await fetchTicketsByFixVersions([args.release]);
-  const jiraBaseUrl = process.env.JIRA_BASE_URL;
-  const toolTickets = rawIssues.map((issue) => normalizeJiraIssue(issue, new Map(), jiraBaseUrl));
+  const config = getConfig();
+  const toolTickets = rawIssues.map((issue) => normalizeJiraIssue(issue, new Map(), new Map(), config));
 
   const sheetByKey = new Map(sheetRows.map((r) => [r.key, r]));
   const toolByKey = new Map(toolTickets.map((t) => [t.key, t]));

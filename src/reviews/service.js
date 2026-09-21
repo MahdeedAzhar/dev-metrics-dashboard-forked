@@ -1,25 +1,31 @@
+import { getConfig } from '../config/index.js';
 import { postJiraComment } from '../fetch/jira.js';
-import {
-  createReviewLogId,
-  listLogsForIssue,
-  readReviewLogStore,
-  writeReviewLogStore,
-} from '../cache/reviewLogs.js';
+import { assertIssueKey } from '../fetch/jiraClient.js';
+import { createReviewLogId, listLogsForIssue, readReviewLogStore, writeReviewLogStore } from '../cache/reviewLogs.js';
 
 function normalizeReviewer(value) {
-  return String(value ?? '').replace(/[\r\n]+/g, ' ').trim().slice(0, 80);
+  return String(value ?? '')
+    .replace(/[\r\n]+/g, ' ')
+    .trim()
+    .slice(0, 80);
 }
 
 function normalizeTimeSpent(value) {
-  return String(value ?? '').replace(/[\r\n]+/g, ' ').trim().slice(0, 40);
+  return String(value ?? '')
+    .replace(/[\r\n]+/g, ' ')
+    .trim()
+    .slice(0, 40);
 }
 
 function normalizeIssueKey(value) {
-  return String(value ?? '').trim().slice(0, 40);
+  const raw = String(value ?? '').trim();
+  if (!raw) return '';
+  return assertIssueKey(raw);
 }
 
-export function formatReviewComment(reviewer, timeSpent) {
-  return `${reviewer} spent ${timeSpent} on code review`;
+/** Renders REVIEW_COMMENT_TEMPLATE ("{reviewer} spent {time} on code review" by default). */
+export function formatReviewComment(reviewer, timeSpent, template = getConfig().reviews.commentTemplate) {
+  return template.replaceAll('{reviewer}', reviewer).replaceAll('{time}', timeSpent);
 }
 
 function assertTicketExists(bundle, issueKey) {
@@ -84,9 +90,8 @@ export async function updateReviewLog({ issueKey, logId, reviewer, timeSpent, bu
 
   const previous = logs[index];
   const comment = formatReviewComment(reviewerName, duration);
-  const editNote = previous.comment === comment
-    ? comment
-    : `Updated code review log: ${comment} (was: ${previous.comment})`;
+  const editNote =
+    previous.comment === comment ? comment : `Updated code review log: ${comment} (was: ${previous.comment})`;
   if (postToJira) {
     await postJiraComment(key, editNote);
   }
