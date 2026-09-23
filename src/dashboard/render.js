@@ -197,6 +197,7 @@ export function renderDashboard(bundle) {
   .subsection-title { font-size: 13px; font-weight: 650; margin: 18px 0 8px; color: var(--text-secondary); }
   .timeline-label { font-size: 13px; font-weight: 600; color: var(--text-secondary); margin: 16px 0 8px; }
   .meta { color: var(--text-secondary); font-size: 13px; margin: 4px 0 0; line-height: 1.5; }
+  .chart-note { color: var(--text-muted); font-size: 12px; margin: 0 0 10px; }
   .caveat { color: var(--text-muted); font-size: 12.5px; margin: -4px 0 16px; max-width: 76ch; line-height: 1.5; }
   .section > h2 {
     padding-left: 12px; border-left: 3px solid var(--series-1); position: relative;
@@ -237,6 +238,10 @@ export function renderDashboard(bundle) {
   .kpi-tile .stat-label { display: block; color: rgba(255,255,255,0.9); font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.02em; }
   .kpi-tile .stat-value { display: block; font-size: 28px; font-weight: 700; margin-top: 6px; letter-spacing: -0.01em; }
   .coverage-note { font-size: 11px; font-weight: 500; color: var(--text-muted); }
+  /* On a KPI tile the coverage note sits on the coloured gradient, where the
+     muted grey used elsewhere is unreadable. Put it on its own line in a
+     translucent white instead of inline beside the 28px value. */
+  .kpi-tile .coverage-note { display: block; margin-top: 2px; color: rgba(255,255,255,0.88); font-size: 11px; font-weight: 600; }
 
   .release-picker {
     display: flex; flex-wrap: wrap; gap: 8px; padding: 16px;

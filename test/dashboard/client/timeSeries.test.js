@@ -11,6 +11,9 @@ import {
   buildPrActivityTrend,
   buildDeveloperActivityTimeline,
   buildCycleTimeDistribution,
+  chooseBucketPeriod,
+  rollUpBuckets,
+  resolveTrendWindow,
 } from '../../../src/dashboard/client/timeSeriesNode.js';
 
 function ticket(overrides) {
@@ -253,4 +256,127 @@ test('buildCycleTimeDistribution shows null mean/median (not 0) with zero covera
   assert.equal(dist.mean_hours, null);
   assert.equal(dist.median_hours, null);
   assert.equal(dist.coverage, 0);
+});
+
+// --- trend bucketing (readability of long windows) ---
+
+test('chooseBucketPeriod keeps short windows daily and rolls longer ones up', () => {
+  assert.equal(chooseBucketPeriod(1), 'day');
+  assert.equal(chooseBucketPeriod(70), 'day');
+  assert.equal(chooseBucketPeriod(71), 'week');
+  assert.equal(chooseBucketPeriod(400), 'week');
+  assert.equal(chooseBucketPeriod(401), 'month');
+});
+
+test('rollUpBuckets preserves totals and labels each bucket by the period start', () => {
+  const daily = [
+    { date: '2026-07-01', value: 1 }, // Wednesday
+    { date: '2026-07-05', value: 2 }, // Sunday — same ISO week
+    { date: '2026-07-06', value: 4 }, // Monday — next week
+    { date: '2026-08-02', value: 8 },
+  ];
+  assert.deepEqual(rollUpBuckets(daily, 'week'), [
+    { date: '2026-06-29', value: 3 },
+    { date: '2026-07-06', value: 4 },
+    { date: '2026-07-27', value: 8 },
+  ]);
+  assert.deepEqual(rollUpBuckets(daily, 'month'), [
+    { date: '2026-07-01', value: 7 },
+    { date: '2026-08-01', value: 8 },
+  ]);
+  assert.deepEqual(rollUpBuckets(daily, 'day'), daily);
+
+  const total = (buckets) => buckets.reduce((sum, b) => sum + b.value, 0);
+  for (const period of ['day', 'week', 'month']) {
+    assert.equal(total(rollUpBuckets(daily, period)), 15, `total changed for ${period}`);
+  }
+});
+
+test('resolveTrendWindow spans first to last activity, never past today', () => {
+  const window = resolveTrendWindow(
+    ['2026-07-10T00:00:00Z', null, '2026-07-01T00:00:00Z', '2026-07-05T00:00:00Z'],
+    '2026-09-01T00:00:00Z',
+  );
+  assert.equal(window.rangeStart, '2026-07-01');
+  assert.equal(window.rangeEnd, '2026-07-10'); // clamped to the last event, not today
+  assert.equal(window.day_count, 10);
+  assert.equal(window.period, 'day');
+
+  // Everything in the future (clock skew / bad data): keep the events rather than blanking the chart.
+  const future = resolveTrendWindow(['2026-09-30T00:00:00Z'], '2026-07-01T00:00:00Z');
+  assert.equal(future.rangeStart, '2026-09-30');
+  assert.equal(future.rangeEnd, '2026-09-30');
+  assert.equal(resolveTrendWindow([], '2026-07-01T00:00:00Z'), null);
+  assert.equal(resolveTrendWindow([null, undefined], '2026-07-01T00:00:00Z'), null);
+});
+
+test('buildEngineeringActivityTrend ignores ticket creation when choosing its window', () => {
+  // A ticket filed nine months before anyone touched it must not stretch the
+  // chart across nine months of empty days.
+  const tickets = [
+    ticket({
+      created_at: '2025-10-01T00:00:00Z',
+      first_in_progress_at: '2026-07-01T00:00:00Z',
+      resolved_at: '2026-07-04T00:00:00Z',
+      linked_prs: [pr({ pr_created_at: '2026-07-02T00:00:00Z', pr_merged_at: '2026-07-04T00:00:00Z' })],
+    }),
+  ];
+  const trend = buildEngineeringActivityTrend(tickets, '2026-07-10T00:00:00Z');
+  assert.equal(trend.bucket_period, 'day');
+  assert.equal(trend.day_count, 4);
+  assert.equal(trend.tickets_completed_by_day.length, 4);
+  assert.equal(trend.tickets_completed_by_day[0].date, '2026-07-01');
+});
+
+test('buildEngineeringActivityTrend switches to weekly buckets on a long window', () => {
+  const tickets = [
+    ticket({
+      created_at: '2026-01-01T00:00:00Z',
+      first_in_progress_at: '2026-01-05T00:00:00Z',
+      resolved_at: '2026-01-06T00:00:00Z',
+    }),
+    ticket({
+      created_at: '2026-01-01T00:00:00Z',
+      first_in_progress_at: '2026-06-01T00:00:00Z',
+      resolved_at: '2026-06-02T00:00:00Z',
+    }),
+  ];
+  const trend = buildEngineeringActivityTrend(tickets, '2026-06-30T00:00:00Z');
+  assert.equal(trend.bucket_period, 'week');
+  // ~22 weeks of points instead of ~149 daily ones, with both completions kept.
+  assert.ok(trend.tickets_completed_by_day.length < 30, `got ${trend.tickets_completed_by_day.length} points`);
+  assert.equal(
+    trend.tickets_completed_by_day.reduce((sum, b) => sum + b.value, 0),
+    2,
+  );
+});
+
+test('buildEngineeringActivityTrend returns empty series when nothing has happened yet', () => {
+  const trend = buildEngineeringActivityTrend(
+    [ticket({ first_in_progress_at: null, resolved_at: null })],
+    '2026-07-10T00:00:00Z',
+  );
+  assert.deepEqual(trend.tickets_completed_by_day, []);
+  assert.deepEqual(trend.pr_opened_by_day, []);
+});
+
+test('buildPrActivityTrend reports its bucket period and keeps PR totals intact', () => {
+  const tickets = [
+    ticket({
+      linked_prs: [pr({ pr_number: 1, pr_created_at: '2026-01-02T00:00:00Z', pr_merged_at: '2026-01-03T00:00:00Z' })],
+    }),
+    ticket({
+      linked_prs: [pr({ pr_number: 2, pr_created_at: '2026-06-01T00:00:00Z', pr_merged_at: '2026-06-02T00:00:00Z' })],
+    }),
+  ];
+  const trend = buildPrActivityTrend(tickets, '2026-06-30T00:00:00Z', 14);
+  assert.equal(trend.bucket_period, 'week');
+  assert.equal(
+    trend.pr_opened_by_day.reduce((sum, b) => sum + b.value, 0),
+    2,
+  );
+  assert.equal(
+    trend.pr_merged_by_day.reduce((sum, b) => sum + b.value, 0),
+    2,
+  );
 });

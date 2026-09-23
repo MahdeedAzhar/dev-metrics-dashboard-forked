@@ -52,6 +52,75 @@ function cumulativeSeries(buckets) {
   });
 }
 
+// A trend chart is only readable when the number of plotted points is close to
+// the number of pixels available. Below these thresholds the buckets stay
+// daily; beyond them daily counts are rolled up so a year-long selection shows
+// ~52 weekly points instead of ~365 mostly-zero daily ones.
+const TREND_DAILY_MAX_DAYS = 70;
+const TREND_WEEKLY_MAX_DAYS = 400;
+
+function chooseBucketPeriod(dayCount) {
+  if (dayCount <= TREND_DAILY_MAX_DAYS) return 'day';
+  if (dayCount <= TREND_WEEKLY_MAX_DAYS) return 'week';
+  return 'month';
+}
+
+/** The day a bucket's period starts on: itself, its ISO week's Monday, or the 1st of its month. */
+function periodStartDay(dayString, period) {
+  if (period === 'month') return `${dayString.slice(0, 7)}-01`;
+  if (period === 'week') {
+    const date = new Date(`${dayString}T00:00:00.000Z`);
+    const mondayOffset = (date.getUTCDay() + 6) % 7;
+    date.setUTCDate(date.getUTCDate() - mondayOffset);
+    return date.toISOString().slice(0, 10);
+  }
+  return dayString;
+}
+
+/**
+ * Sums daily buckets into weekly or monthly ones, labelled by the first day of
+ * each period. Counts are preserved exactly — this only changes granularity,
+ * never the totals. Input must be chronological (bucketByDay guarantees it).
+ */
+function rollUpBuckets(buckets, period) {
+  if (period === 'day') return buckets;
+  const totals = new Map();
+  for (const bucket of buckets) {
+    const key = periodStartDay(bucket.date, period);
+    totals.set(key, (totals.get(key) ?? 0) + bucket.value);
+  }
+  return [...totals.entries()].map(([date, value]) => ({ date, value }));
+}
+
+/**
+ * The window a trend chart covers: from the first to the last *activity* in
+ * the selection (never past today), plus the bucket size that window deserves.
+ * Deliberately not anchored on ticket creation — a release carrying tickets
+ * filed months earlier would otherwise stretch the chart across a long empty
+ * stretch and squash the part anyone is looking at. Returns null when there is
+ * no activity at all.
+ */
+function resolveTrendWindow(eventDates, nowIso) {
+  const days = eventDates
+    .map((value) => toDayString(value))
+    .filter(Boolean)
+    .sort();
+  if (days.length === 0) return null;
+
+  const today = toDayString(nowIso);
+  const rangeStart = days[0];
+  const lastEvent = days[days.length - 1];
+  // The window never runs past today, so an active selection doesn't trail off
+  // into empty future days — unless every event is itself in the future (bad
+  // data or clock skew), where the events win so the chart still renders.
+  const cappedEnd = lastEvent < today ? lastEvent : today;
+  const rangeEnd = cappedEnd < rangeStart ? lastEvent : cappedEnd;
+
+  const dayCount =
+    Math.round((Date.parse(`${rangeEnd}T00:00:00.000Z`) - Date.parse(`${rangeStart}T00:00:00.000Z`)) / 86400000) + 1;
+  return { rangeStart, rangeEnd, day_count: dayCount, period: chooseBucketPeriod(dayCount) };
+}
+
 /** Null-safe mean — excludes non-numeric/missing values, returns null (never 0) if none remain. */
 function computeMean(values) {
   const nums = values.filter((v) => typeof v === 'number' && !Number.isNaN(v));
@@ -135,34 +204,47 @@ function buildReleaseProgressSeries(tickets, nowIso) {
 
 /**
  * Was the team active throughout the selection or was activity concentrated
- * in bursts — per-day counts of PR opened, PR merged, ticket moved to In
- * Progress, ticket completed. Explicitly NOT an "activity score" — no code
- * review data here (would require reintroducing removed GitHub review calls
- * for a soft "if reliable" requirement).
+ * in bursts — counts of PRs opened, PRs merged, tickets moved to In Progress
+ * and tickets completed per bucket. Explicitly NOT an "activity score".
+ *
+ * Bucket size adapts to the window (see resolveTrendWindow / chooseBucketPeriod)
+ * and is reported as `bucket_period` so the UI can say what a point means.
  */
 function buildEngineeringActivityTrend(tickets, nowIso) {
   const now = nowIso ?? new Date().toISOString();
   const prs = dedupeLinkedPrs(tickets);
 
-  const rangeStart = earliestDay([
-    ...tickets.map((t) => t.created_at),
-    ...prs.map((p) => p.pr_created_at),
-  ]);
-  if (!rangeStart) {
+  const window = resolveTrendWindow(
+    [
+      ...prs.map((p) => p.pr_created_at),
+      ...prs.map((p) => p.pr_merged_at),
+      ...tickets.map((t) => t.first_in_progress_at),
+      ...tickets.map((t) => t.resolved_at),
+    ],
+    now,
+  );
+  if (!window) {
     return {
+      bucket_period: 'day',
+      day_count: 0,
       pr_opened_by_day: [],
       pr_merged_by_day: [],
       tickets_in_progress_by_day: [],
       tickets_completed_by_day: [],
     };
   }
-  const rangeEnd = toDayString(now);
+
+  const { rangeStart, rangeEnd, period } = window;
+  const countPerBucket = (items, getDate) =>
+    rollUpBuckets(bucketByDay(items, getDate, () => 1, rangeStart, rangeEnd), period);
 
   return {
-    pr_opened_by_day: bucketByDay(prs, (p) => p.pr_created_at, () => 1, rangeStart, rangeEnd),
-    pr_merged_by_day: bucketByDay(prs, (p) => p.pr_merged_at, () => 1, rangeStart, rangeEnd),
-    tickets_in_progress_by_day: bucketByDay(tickets, (t) => t.first_in_progress_at, () => 1, rangeStart, rangeEnd),
-    tickets_completed_by_day: bucketByDay(tickets, (t) => t.resolved_at, () => 1, rangeStart, rangeEnd),
+    bucket_period: period,
+    day_count: window.day_count,
+    pr_opened_by_day: countPerBucket(prs, (p) => p.pr_created_at),
+    pr_merged_by_day: countPerBucket(prs, (p) => p.pr_merged_at),
+    tickets_in_progress_by_day: countPerBucket(tickets, (t) => t.first_in_progress_at),
+    tickets_completed_by_day: countPerBucket(tickets, (t) => t.resolved_at),
   };
 }
 
@@ -206,13 +288,15 @@ function buildPrActivityTrend(tickets, nowIso, stalePrAfterDays) {
       bucket.open_prs.push(pr);
     }
   }
-  const rangeStart = earliestDay(prs.map((p) => p.pr_created_at));
-  const rangeEnd = toDayString(now);
+  const window = resolveTrendWindow([...prs.map((p) => p.pr_created_at), ...prs.map((p) => p.pr_merged_at)], now);
+  const countPerBucket = (getDate) =>
+    window ? rollUpBuckets(bucketByDay(prs, getDate, () => 1, window.rangeStart, window.rangeEnd), window.period) : [];
 
   return {
     total_prs: prs.length,
-    pr_opened_by_day: rangeStart ? bucketByDay(prs, (p) => p.pr_created_at, () => 1, rangeStart, rangeEnd) : [],
-    pr_merged_by_day: rangeStart ? bucketByDay(prs, (p) => p.pr_merged_at, () => 1, rangeStart, rangeEnd) : [],
+    bucket_period: window ? window.period : 'day',
+    pr_opened_by_day: countPerBucket((p) => p.pr_created_at),
+    pr_merged_by_day: countPerBucket((p) => p.pr_merged_at),
     currently_open_count: openPrs.length,
     average_open_pr_age_days: computeMean(openAges),
     stale_pr_after_days: stalePrAfterDays,

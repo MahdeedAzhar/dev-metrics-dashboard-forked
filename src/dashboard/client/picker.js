@@ -822,10 +822,23 @@
       '</tbody></table>';
   }
 
+  var BUCKET_LABELS = { day: 'per day', week: 'per week', month: 'per month' };
+
+  function bucketCaption(period) {
+    return BUCKET_LABELS[period] || BUCKET_LABELS.day;
+  }
+
   function renderEngineeringActivityTrend() {
     var el = document.getElementById('engineering-activity-trend');
     var trend = buildEngineeringActivityTrend(getVisibleTickets());
-    el.innerHTML = buildLineChart(
+    if (!trend.pr_opened_by_day.length) {
+      el.innerHTML = '<p class="empty-state">No PR or ticket activity recorded in the selected release(s).</p>';
+      return;
+    }
+    el.innerHTML =
+      '<p class="chart-note">Counts ' + bucketCaption(trend.bucket_period) +
+      ', over the period from the first to the most recent activity in this selection.</p>' +
+      buildLineChart(
       [
         { name: 'PRs opened', points: trend.pr_opened_by_day },
         { name: 'PRs merged', points: trend.pr_merged_by_day },
@@ -843,6 +856,9 @@
       return;
     }
     var trend = buildPrActivityTrend(getVisibleTickets(), null, DATA.stale_pr_after_days);
+    var prChartNote = trend.pr_opened_by_day.length
+      ? '<p class="chart-note">Counts ' + bucketCaption(trend.bucket_period) + '.</p>'
+      : '';
     var chart = buildLineChart(
       [
         { name: 'PRs opened', points: trend.pr_opened_by_day },
@@ -905,6 +921,7 @@
       kpiTile('Avg. open PR age', trend.average_open_pr_age_days == null ? '—' : fmtNum(trend.average_open_pr_age_days, 1) + 'd') +
       kpiTile('Open > ' + trend.stale_pr_after_days + 'd', fmtNum(trend.stale_pr_count)) +
       '</div>' +
+      prChartNote +
       chart +
       '<h3 class="subsection-title">Opened/merged PRs by repo</h3>' +
       '<table class="data-table"><thead><tr><th>Repository</th><th>Opened</th><th>Merged</th><th>Open now</th></tr></thead><tbody>' +
