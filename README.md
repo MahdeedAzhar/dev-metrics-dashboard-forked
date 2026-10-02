@@ -1,226 +1,262 @@
-# Engineering Delivery & AI Insights Dashboard
+# Dev Metrics Dashboard
 
-Replaces a manually-maintained Google Sheet with a tool that pulls delivery data
-directly from Jira (Story Points, Actual Points, AI Contribution Percentage —
-all native Jira fields already in use) and generates a self-contained,
-interactive HTML dashboard organized around:
+A self-hosted engineering delivery dashboard for teams that plan in **Jira**
+and ship through **GitHub**. It answers, per release: what was planned, what
+was delivered, by whom, how long work took to reach review, and how much AI
+assistance was involved — with the pull requests as evidence.
 
-> **Release → Ticket → Developer → SP (planned) → AP (delivered) → AI Contribution → Linked PR(s) as evidence**
+It is a visibility tool, not a performance-evaluation system: there is no
+score, no ranking and no "at risk" label.
 
-This is a transparent delivery-visibility tool, not an automated performance
-evaluation system: there is no composite score, no On Track/Watch/At Risk
-label, and no ranking. It surfaces what was planned, what was delivered, how
-that was distributed across the team, and how AI was involved — GitHub PRs
-appear only as supporting evidence linked to each ticket.
+- **Docs:** [Configuration](docs/CONFIGURATION.md) · [Architecture](docs/ARCHITECTURE.md) · [Metrics](docs/METRICS.md) · [Jira setup](docs/JIRA_SETUP.md) · [GitHub setup](docs/GITHUB_SETUP.md) · [AI contribution](docs/AI_CONTRIBUTION.md) · [Troubleshooting](docs/TROUBLESHOOTING.md) · [Security](docs/SECURITY.md) · [Changes & roadmap](docs/CHANGES.md)
 
-## Setup
+## What is Dev Metrics?
+
+A Node.js application that:
+
+1. reads releases (versions) and tickets from a Jira project,
+2. reads pull requests, reviews and commits from one or more GitHub repositories,
+3. links PRs to tickets by key,
+4. renders one self-contained HTML page where every chart recalculates in the
+   browser as you select releases, developers and filters.
+
+It runs locally with one command, or on Vercel with a daily refresh.
+
+## Why does it exist?
+
+Engineering managers were maintaining release spreadsheets by hand: story
+points, actual points, AI usage, links to PRs. The numbers already lived in
+Jira and GitHub. This tool reads them directly, keeps a single definition for
+each metric ([docs/METRICS.md](docs/METRICS.md)), and shows the supporting
+evidence next to every number.
+
+## Features
+
+| Area                 | What you get                                                                                                       |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| Releases             | Released / current / upcoming versions discovered from Jira; pick any combination; deep-linkable (`?releases=`)    |
+| Story points         | Planned SP vs delivered AP per release, per developer, per issue type; cumulative progress over time               |
+| Tickets              | Every ticket in the selection with status, assignee, points, AI %, linked PRs; filter, sort, inline edit           |
+| Code review          | Time to first review, approval and review completion per PR (from GitHub); manual "log review time" → Jira comment |
+| Cycle time           | In Progress → Code Review median/mean, histogram, tickets currently aging                                          |
+| AI contribution      | Ticket-level AI % from Jira; PR-level checklist score and AI co-authored commit share as evidence                  |
+| Activity             | PRs opened/merged and tickets started/completed per day; stale-PR list; per-developer timeline                     |
+| Jira write-back      | Edit SP/AP/AI %/status/assignee/summary/issue type from the table (allowlisted, validated, fails loudly)           |
+| Assistant (optional) | Ask questions in plain language over the dashboard data; proposes Jira edits that you confirm                      |
+
+Every feature that depends on something you haven't configured (GitHub, actual
+points, AI tracking, assistant, editing) is hidden rather than shown empty.
+
+## Architecture
+
+```
+Jira (REST v3) ─┐                                   ┌─ browser computes all metrics
+                ├─► generateDashboard() ─► bundle ──┤   (deliveryMath.js / timeSeries.js)
+GitHub (REST) ──┘        src/index.js       JSON    └─ self-contained dashboard.html
+```
+
+- No framework, no build step, one runtime dependency (`@vercel/blob`, Vercel only).
+- All configuration is environment variables; nothing project-specific in code.
+- Two transports share one implementation: `src/server.js` (local) and
+  `api/*.js` (Vercel) both call `src/http/handlers.js`.
+
+Full description: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+## Supported integrations
+
+| Integration                          | Required    | Protocol                              | Notes                                            |
+| ------------------------------------ | ----------- | ------------------------------------- | ------------------------------------------------ |
+| Jira Cloud                           | Yes         | REST API v3, API token (Basic auth)   | Read tickets/versions/changelog; optional writes |
+| GitHub (github.com)                  | No          | REST API, personal access token       | Read-only: PRs, reviews, comments, commits       |
+| OpenAI-compatible LLM (Groq default) | No          | `/chat/completions` with tool calling | Powers the assistant panel only                  |
+| Vercel Blob                          | Vercel only | `@vercel/blob`                        | Durable snapshot + review logs on serverless     |
+
+**No MCP servers are used or required.** The repository may be developed with
+Claude Code and the Arbisoft workflow skills (which use Atlassian/GitHub MCPs
+for the developer's own workflow), but the application itself talks to Jira
+and GitHub directly. Jira Server/Data Center and GitHub Enterprise are not
+supported without changing the base URLs in `src/fetch/*` (see roadmap).
+
+## Requirements
+
+- Node.js **20 or newer** (uses `node --test`, `--env-file-if-exists`, global `fetch`).
+- A Jira Cloud account with an API token ([docs/JIRA_SETUP.md](docs/JIRA_SETUP.md)).
+- Optionally a GitHub token ([docs/GITHUB_SETUP.md](docs/GITHUB_SETUP.md)).
+
+## Installation
 
 ```bash
+git clone <this repository>
+cd dev-metrics-dashboard
+npm install
 cp .env.example .env
-# fill in GITHUB_TOKEN, JIRA_EMAIL, JIRA_API_TOKEN in .env
 ```
-
-- `GITHUB_TOKEN`: a GitHub personal access token with read access to the repos
-  in `config/config.js` (used only to find PRs as evidence for Jira tickets).
-- `JIRA_EMAIL` / `JIRA_API_TOKEN`: a Jira Cloud API token
-  (id.atlassian.com → Security → API tokens) for `JIRA_BASE_URL`
-  (defaults to `https://arbisoft.atlassian.net`).
-- `AI_API_KEY`: an API key for the configured OpenAI-compatible provider. Groq's
-  developer tier is the default low-cost option. The assistant sends questions to the model, while Jira/GitHub facts are
-  retrieved through server-side tools from the dashboard bundle. The model
-  **must support tool calling** (the default `openai/gpt-oss-120b` does).
-- `AI_BASE_URL`: optional provider base URL (defaults to Groq's
-  `https://api.groq.com/openai/v1`).
-- `AI_MODEL`: optional model name (defaults to
-  `openai/gpt-oss-120b`).
-
-Requires Node.js 20+.
-
-## Usage
-
-```bash
-npm start                                # generate the dashboard for config.releasesToTrack
-npm start -- --releases "8.5.0,8.6.0"    # override which releases to include in this run
-npm run live                              # run the live server
-DEFAULT_RELEASES="8.5.1 (Subscription),8.6.0" npm run live
-```
-
-## Deploying to Vercel
-
-This repository includes Vercel serverless routes, so deploy the repository as
-an **Other** framework project — no build command or output directory is
-needed. Set these environment variables in the Vercel project settings:
-
-- `GITHUB_TOKEN`, `JIRA_BASE_URL`, `JIRA_EMAIL`, and `JIRA_API_TOKEN`
-- `DASHBOARD_USERNAME` and `DASHBOARD_PASSWORD` (required on Vercel; the site
-  uses HTTP Basic Auth to protect both the dashboard and Jira update API)
-- `CRON_SECRET` (a random secret used by Vercel Cron)
-- `BLOB_READ_WRITE_TOKEN` from a **private** Vercel Blob store connected to the
-  project
-- optional: `DEFAULT_RELEASES`
-
-The deployment serves the dashboard at `/`, accepts the existing
-`?releases=` query parameters, and retains inline Jira editing at
-`/api/tickets/:issueKey`. A protected Vercel Cron route refreshes the saved
-dashboard bundle daily; page loads serve the last successful snapshot
-immediately. The visible **Refresh dashboard** button and Jira edits refresh
-that same snapshot on demand. This schedule works on Vercel Hobby, whose Cron
-jobs are limited to daily runs. The low-level GitHub/Jira working cache remains
-a best-effort `/tmp` optimization, while the displayed dashboard snapshot is
-stored durably in private Blob storage.
-
-The live dashboard also supports choosing the startup release selection via URL query parameters:
-
-- Single release: `http://localhost:3000/?releases=8.6.0`
-- Multiple releases: `http://localhost:3000/?releases=8.5.0,8.6.0`
-- Multiple query params (equivalent): `http://localhost:3000/?releases=8.5.0&releases=8.6.0`
-
-If both query params and `DEFAULT_RELEASES` are provided, the query params take precedence.
-
-### Engineering data assistant
-
-The dashboard includes a protected assistant panel powered by an
-OpenAI-compatible model provider. It can
-search the dashboard's Jira tickets and linked GitHub pull requests, calculate
-release summaries, and answer questions about developers, story points, actual
-points, statuses, and delivery evidence. It is constrained to the data tools
-defined by the server, so answers can only use the current dashboard bundle.
-
-The assistant can propose Jira edits for supported fields, but every edit is
-shown in the dashboard and requires an explicit confirmation before the
-existing Jira update path is called. GitHub data is read-only.
-
-Output:
-- `data/output/dashboard.html` — open this in a browser. The release picker,
-  developer drill-down, sorting, and filtering all happen live in the page —
-  no re-running the script needed to explore what's already in the file.
-- `data/output/bundle.json` — the same `{releases, tickets}` data as JSON,
-  useful for debugging.
-- `data/cache/` — raw GitHub PR data and the last-fetched Jira ticket set,
-  cached locally so re-runs only re-fetch GitHub PRs that changed. Jira
-  tickets are always refetched in full on every run (SP/AP/AI% are actively
-  edited throughout a release, so staleness matters more here than PR data).
 
 ## Configuration
 
-Everything tunable lives in `config/config.js`:
-- `repos`: GitHub repos to search for PR evidence.
-- `releasesToTrack`: the Jira fixVersions a run includes by default (override
-  per-run with `--releases`). Deliberately an explicit list, not
-  auto-discovered — a stale list is easy to notice and fix.
-- `jiraStoryPointsFieldId`, `jiraActualPointsFieldId`, `jiraAiContributionFieldId`:
-  confirmed live against real tickets on this Jira instance, not guessed.
-  **Note**: the AI Contribution field is stored in Jira as a 0–1 fraction —
-  the tool multiplies by 100 for display; re-verify this if pointing at a
-  different Jira instance.
-- `lookbackDays`: how far back the GitHub PR cache reaches, which bounds how
-  complete the ticket → PR evidence links can be.
-- `stalePrAfterDays` (default 14): how long a PR must have been open to show up
-  in the PR Activity Trend's stale list — a team-level, purely descriptive
-  fact, never attributed to whoever opened it.
-
-## How the dashboard works
-
-Every section recomputes live in the browser as you change the release
-selection — nothing is pre-aggregated server-side, because "% of highest AP,"
-the activity trends, and the cycle-time distribution only mean something
-relative to whichever release(s) are currently selected:
-
-1. **Release Summary** — total tickets, completed/remaining, total planned SP,
-   total delivered AP, team AI contribution (averaged only over tickets with a
-   recorded value, with a coverage count shown alongside it).
-2. **Release Progress Over Time** — cumulative delivered AP against a flat
-   "total planned SP" reference line, and cumulative tickets completed, both
-   by resolution date — shows whether delivery is steady or back-loaded.
-3. **Ticket Status Breakdown** — current split of To Do / In Progress / Done.
-4. **Issue Type Breakdown** — ticket count / planned SP / delivered AP faceted
-   by issue type (Bug, Story, Task, etc.).
-5. **Engineering Activity Trend** — per-day counts of PRs opened, PRs merged,
-   tickets moving to In Progress, and tickets completed. Purely descriptive —
-   not an "activity score."
-6. **PR Activity Trend** — PRs opened/merged over time, how many are currently
-   open, average open-PR age, and a team-level (never per-developer) list of
-   PRs open longer than `stalePrAfterDays`.
-7. **Delivery Flow: In Progress → Code Review** — mean and median hours from a
-   ticket's first move into "In Progress" to its first subsequent move into
-   "Code Review" (median shown alongside the mean, since averages mislead
-   here), a fixed-bucket histogram of the distribution, and a list of tickets
-   currently aging in "In Progress" with no Code Review transition yet.
-8. **Developer Delivery** — one row per developer: tickets, planned SP,
-   delivered AP, % of the highest AP delivered by anyone in the current
-   selection, % of the team's total AP, and average AI contribution. Click a
-   row to jump to that developer's tickets below.
-9. **Developer Details** — the selected developer's own tickets (key linked to
-   Jira, summary, status, SP, AP, AI contribution, linked PR(s) linked to
-   GitHub — "No linked PR found" is neutral, never a negative signal), plus a
-   personal activity timeline (tickets completed, PRs opened/merged over
-   time) — never a comparison against anyone else.
-10. **All Release Tickets** — every ticket in the selected release(s),
-    filterable by developer/status/issue type and sortable by SP/AP/AI
-    contribution.
-
-Selecting multiple releases doesn't double-count a ticket that belongs to more
-than one — the underlying dataset is a flat map keyed by ticket key, so
-selecting several releases is just "tickets whose fixVersions intersect the
-selection," and a ticket in two selected releases is still one ticket.
-
-AP (Actual Points) and AI Contribution are pulled directly from Jira, not
-derived from PRs — PRs are matched to tickets by ticket ID (parsed from the PR
-title/body) purely to surface as supporting evidence, and they carry two of
-their own signals for context: the self-reported AI Contribution Checklist
-from the PR body, and the share of the PR's commits carrying a
-"Co-Authored-By: Claude ..." trailer (structured, harder to game). Neither
-feeds any Jira-level number or any score — there is no score.
-
-### Cycle-time data (changelog)
-
-The bulk Jira search endpoint doesn't return status-change history, so
-cycle-time needs one extra API call per ticket
-(`GET /rest/api/3/issue/{key}/changelog`). Unlike ticket fields (always
-refetched in full — one cheap call regardless of ticket count), changelogs are
-cached per ticket in `data/cache/jira/changelogs.json`, keyed by that ticket's
-own Jira `updated` timestamp: a ticket's changelog is only refetched when
-`updated` has changed since it was last cached. `updated` changes on *any*
-field edit, not just a status transition, so this may occasionally refetch a
-changelog that didn't actually change — but it will never skip a refetch that
-was needed.
-
-## Validating against the manual Google Sheet
+Edit `.env`. The minimum for a first run:
 
 ```bash
-node --env-file=.env scripts/validateAgainstSheet.js --csv <path-to-export.csv> --release "8.6.0"
+PROJECT_NAME=My Project
+JIRA_BASE_URL=https://your-org.atlassian.net
+JIRA_EMAIL=you@your-org.com
+JIRA_API_TOKEN=...
+JIRA_PROJECT_KEY=ABC
+JIRA_STORY_POINTS_FIELD=customfield_10016   # npm run jira:fields tells you which
 ```
 
-Export the sheet's relevant tab as CSV, then run this to diff it against the
-tool's own Jira-fetched data for that release: ticket count, assignees, SP
-totals, AP totals, AI contribution (with a unit sanity check — warns if the
-sheet's AI column looks like a 0–1 fraction instead of 0–100), developer-level
-SP/AP, and release membership, all compared both directions. Add `--json` for
-machine-readable output. This runs the *same* fetch/normalize code path the
-dashboard itself uses, so a mismatch means real data disagreement, not two
-independently-buggy implementations agreeing with each other.
+Then verify everything against the live APIs:
 
-## Known limitations
+```bash
+npm run check
+```
 
-- **Ticket → PR evidence is only as complete as the GitHub PR cache's fetch
-  window** (`lookbackDays`, default 90) — a ticket resolved via a PR merged
-  long before that window won't show evidence here even though one exists on
-  GitHub. This is treated as neutral ("no linked PR found"), never negative.
-- **Developer identity is strictly the Jira assignee** — there's no mapping
-  between a GitHub PR author and a Jira assignee, so a ticket's evidence PRs
-  may have been authored by someone other than the ticket's assignee (e.g. a
-  teammate picking up a PR). This is expected and not flagged as a discrepancy.
-- **AP and AI Contribution reflect whatever is currently recorded in Jira** —
-  if a ticket hasn't been updated with its actual points or AI contribution
-  yet, those show as "not yet recorded" (blank), never estimated or assumed 0.
-- **`releasesToTrack` is a manually maintained list** — add a new release to
-  `config/config.js` (or pass `--releases`) when one starts.
-- **Cycle-time uses the *first* "In Progress" → *first subsequent* "Code
-  Review" transition** — tickets that cycle Code Review ↔ Internal QA
-  (confirmed happening in real data) are handled correctly, but a ticket
-  created directly into "In Progress" (skipping that transition entirely) has
-  no recorded starting point, so it shows no cycle-time value — a disclosed
-  gap, not an estimate.
-- **Developer Activity Timeline's PR data comes from the developer's assigned
-  tickets' linked PRs**, not GitHub PR authorship — consistent with the
-  no-GitHub-login-mapping decision above.
+Every variable, its default and its effect: [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
+
+## Jira setup
+
+1. Create an API token at id.atlassian.com → Security.
+2. Make sure the account can browse the project (plus edit/transition/comment
+   if you want write features).
+3. `npm run jira:fields` → copy the custom field ids for story points and,
+   if your team uses them, actual points and AI contribution.
+4. Map your workflow's status names if they aren't `In Progress` / `Code Review`.
+5. Tickets must carry a **fixVersion** — the dashboard is organised by version.
+
+Details and required permissions: [docs/JIRA_SETUP.md](docs/JIRA_SETUP.md).
+
+## GitHub setup
+
+1. Create a fine-grained token with **Pull requests: Read** and **Contents: Read**
+   on the repositories you want.
+2. `GITHUB_REPOS=org/repo-a,org/repo-b`, `GITHUB_TOKEN=...`.
+3. Name PRs `ABC-123: …` (or `[ABC-123] …`, `feat(ABC-123): …`) so they link to tickets.
+
+Details: [docs/GITHUB_SETUP.md](docs/GITHUB_SETUP.md).
+
+## AI contribution setup
+
+Three optional sources: a numeric Jira field on the ticket, an
+`AI Contribution Checklist` table in the PR description, and
+`Co-Authored-By:` commit trailers from coding assistants. Configure any subset
+or turn the feature off with `AI_CONTRIBUTION_ENABLED=false`.
+
+Details and the PR template snippet: [docs/AI_CONTRIBUTION.md](docs/AI_CONTRIBUTION.md).
+
+## Local development
+
+```bash
+npm run dev          # server on http://localhost:3000, restarts on file changes
+npm start            # same without the file watcher
+npm run generate     # one-off: writes data/output/dashboard.html + bundle.json
+npm run generate -- --releases "1.2.0,1.3.0"   # explicit releases for this run
+```
+
+The local server regenerates every 60 seconds and on the **Refresh** button.
+`?releases=1.2.0` in the URL pre-selects releases. `curl localhost:3000/health`
+shows the last generation time and error.
+
+Data lives under `data/` (gitignored): `cache/` (GitHub PRs, Jira changelogs,
+review logs) and `output/`.
+
+## Testing
+
+```bash
+npm test             # node:test, ~130 tests, no network, no credentials needed
+npm run test:watch
+```
+
+External APIs are mocked by replacing `globalThis.fetch`
+(`test/helpers/config.js` → `mockFetch`). Metric functions are tested by
+running the exact browser source in Node.
+
+## Build
+
+There is no compile step. `npm run build` runs lint + tests and then generates
+the static dashboard into `data/output/`:
+
+```bash
+npm run lint         # eslint
+npm run lint:fix
+npm run format       # prettier --write
+npm run format:check
+npm run build        # lint + test + generate
+```
+
+## Deployment
+
+### Vercel (recommended)
+
+1. Import the repository as an **Other** framework project (no build command,
+   no output directory). `vercel.json` defines the routes and a daily cron.
+2. Add the environment variables from `.env` **plus**:
+   - `DASHBOARD_USERNAME` / `DASHBOARD_PASSWORD` — HTTP Basic Auth for the whole site (mandatory),
+   - `CRON_SECRET` — any random string (`openssl rand -hex 32`),
+   - a **private Vercel Blob store** connected to the project (provides `BLOB_READ_WRITE_TOKEN`).
+3. Deploy. The first page load generates the snapshot; the cron refreshes it
+   daily (Hobby plan limit) and the Refresh button on demand.
+
+### Self-hosted
+
+Run `npm start` under a process manager behind a reverse proxy that adds
+authentication. Set `DATA_DIR` to a persistent volume.
+
+## Troubleshooting
+
+Run `npm run check` first. Common issues and fixes:
+[docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
+
+## Adding a new project
+
+Onboarding checklist for a team receiving this repository:
+
+| You need                     | Where it goes                                                       |
+| ---------------------------- | ------------------------------------------------------------------- |
+| Project name                 | `PROJECT_NAME`                                                      |
+| Jira URL                     | `JIRA_BASE_URL`                                                     |
+| Jira project key             | `JIRA_PROJECT_KEY`                                                  |
+| Jira email + API token       | `JIRA_EMAIL`, `JIRA_API_TOKEN`                                      |
+| Story points field id        | `JIRA_STORY_POINTS_FIELD` (`npm run jira:fields`)                   |
+| Actual points / AI field ids | `JIRA_ACTUAL_POINTS_FIELD`, `JIRA_AI_CONTRIBUTION_FIELD` (optional) |
+| Workflow status names        | `JIRA_IN_PROGRESS_STATUSES`, `JIRA_CODE_REVIEW_STATUSES`            |
+| GitHub org/repos + token     | `GITHUB_REPOS`, `GITHUB_TOKEN` (optional)                           |
+| Default branch filter        | `GITHUB_BASE_BRANCH` (optional)                                     |
+| AI contribution on/off       | `AI_CONTRIBUTION_ENABLED`                                           |
+
+Jira boards are not needed — the tool works from versions. Then:
+
+```bash
+npm install && cp .env.example .env   # fill in the table above
+npm run check                          # validates config, verifies credentials
+npm run dev                            # open http://localhost:3000
+```
+
+Teams that plan by sprint instead of by version: see "Future improvements" in
+[docs/CHANGES.md](docs/CHANGES.md); today, create a version per sprint or set
+fixVersions on sprint tickets.
+
+## Adding a new metric
+
+1. Write a pure function in `src/dashboard/client/deliveryMath.js`
+   (snapshot rollups) or `timeSeries.js` (time-bucketed), taking the visible
+   tickets as input.
+2. Export it from the matching `*Node.js` wrapper and add a test under
+   `test/dashboard/client/`.
+3. Add a `render<Name>()` in `src/dashboard/client/picker.js`, call it from
+   `renderAll()`, and add the section container in `src/dashboard/render.js`.
+4. If it needs a new field: add it in `src/normalize/ticketRecord.js`
+   (tickets) or `buildPrRecord()` in `src/index.js` (PRs).
+5. Define it in [docs/METRICS.md](docs/METRICS.md).
+
+Other extension points (new Jira field, new integration, new write action):
+[docs/ARCHITECTURE.md → Extension points](docs/ARCHITECTURE.md#extension-points).
+
+## Contributing
+
+- Branch from `main`; keep PRs focused. Run `npm run build` before opening one.
+- Metric changes must update `docs/METRICS.md` and the tests next to the code.
+- Never commit `.env` or real ticket data; test fixtures use fictional keys.
+- Anything that writes to Jira must validate the issue key, use the field
+  allowlist and return the upstream error verbatim.
+- Configuration goes in `src/config/index.js` + `.env.example` +
+  `docs/CONFIGURATION.md`, never in code constants.

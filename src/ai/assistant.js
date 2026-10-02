@@ -1,7 +1,21 @@
 import { computeReleaseSummary, filterTicketsBySelectedReleases } from '../dashboard/client/deliveryMathNode.js';
-import { updateJiraIssueField, postJiraComment } from '../fetch/jira.js';
+import { getConfig } from '../config/index.js';
+import {
+  EDITABLE_FIELDS as JIRA_EDITABLE_FIELDS,
+  fetchJiraIssue,
+  updateJiraIssueField,
+  postJiraComment,
+} from '../fetch/jira.js';
+import { assertIssueKey } from '../fetch/jiraClient.js';
+import { searchPullRequests } from '../fetch/github.js';
+import { formatReviewComment } from '../reviews/service.js';
 
-const DEFAULT_AI_BASE_URL = 'https://api.groq.com/openai/v1';
+// Optional "ask a question" assistant. It talks to any OpenAI-compatible
+// chat-completions endpoint that supports tool calling (AI_BASE_URL / AI_MODEL /
+// AI_API_KEY) and can only answer from the dashboard bundle through the tools
+// below. Jira writes are always proposed first and applied only after the
+// user confirms in the UI.
+
 const MAX_TOOL_ROUNDS = 8;
 /** Preferred chat-completion models, ordered. All of these support tool
  * calling (verified against the Groq API) — required by the assistant loop.
@@ -19,32 +33,41 @@ const FALLBACK_MODELS = [
   'meta-llama/llama-4-maverick-17b-128e-instruct',
   'llama-3.1-8b-instant',
 ];
-const DEFAULT_MODEL = 'openai/gpt-oss-120b';
 /** Models that exist on providers but cannot serve chat completions (e.g. TTS like canopylabs/orpheus-arabic-saudi). */
 const NON_CHAT_MODEL_PATTERN = /whisper|guard|tts|orpheus|embed|distil-|safeguard/i;
 let modelCandidates = null; // { baseUrl, names: [] } ordered list of usable models
 let lastSelectedModel = null;
-const EDITABLE_FIELDS = new Set([
-  'summary',
-  'status',
-  'assignee',
-  'issue_type',
-  'sp',
-  'ap',
-  'ai_contribution_percent',
-]);
+const EDITABLE_FIELDS = new Set(JIRA_EDITABLE_FIELDS);
 
-function normalizeRepoQuery(query) {
-  if (!query) return '';
+// Loose aliases people use for repositories, mapped onto words that commonly
+// appear in repository names. Only applied when a configured repo name
+// actually contains the target word.
+const REPO_ALIASES = [
+  {
+    words: ['fe', 'frontend', 'front-end', 'front end', 'client', 'web', 'ui', 'app'],
+    targets: ['client', 'frontend', 'web', 'ui', 'app'],
+  },
+  { words: ['be', 'backend', 'back-end', 'back end', 'server', 'api'], targets: ['server', 'backend', 'api'] },
+  { words: ['mobile', 'ios', 'android'], targets: ['mobile', 'ios', 'android'] },
+];
+
+/**
+ * Resolves a free-text repository reference ("backend", "the client",
+ * "acme-server") to one of the configured owner/name repos, or null.
+ */
+export function matchConfiguredRepo(query, repos) {
+  if (!query || repos.length === 0) return null;
   const q = String(query).toLowerCase().trim();
-
-  const clientAliases = ['client', 'fe', 'frontend', 'front-end', 'front end', 'xiangqi-client'];
-  const serverAliases = ['server', 'be', 'backend', 'back-end', 'back end', 'xiangqi-server'];
-
-  if (clientAliases.some((alias) => q.includes(alias))) return 'xiangqi-client';
-  if (serverAliases.some((alias) => q.includes(alias))) return 'xiangqi-server';
-
-  return q;
+  const exact = repos.find((repo) => repo.toLowerCase() === q || repo.split('/')[1].toLowerCase() === q);
+  if (exact) return exact;
+  const contains = repos.find((repo) => q.includes(repo.split('/')[1].toLowerCase()) || repo.toLowerCase().includes(q));
+  if (contains) return contains;
+  for (const alias of REPO_ALIASES) {
+    if (!alias.words.some((word) => q === word || q.includes(word))) continue;
+    const hit = repos.find((repo) => alias.targets.some((target) => repo.split('/')[1].toLowerCase().includes(target)));
+    if (hit) return hit;
+  }
+  return null;
 }
 
 const tools = [
@@ -52,14 +75,14 @@ const tools = [
     type: 'function',
     function: {
       name: 'search_tickets',
-      description: 'Find Jira tickets in dashboard data by release, developer, status, issueKey (e.g. XQ-3683), or text.',
+      description: 'Find Jira tickets in dashboard data by release, developer, status, issue key, or text.',
       parameters: {
         type: 'object',
         properties: {
           release: { type: 'string' },
           developer: { type: 'string' },
           status: { type: 'string' },
-          text: { type: 'string', describe: 'Search key or summary substring e.g. XQ-3683' },
+          text: { type: 'string', description: 'Ticket key or summary substring.' },
         },
       },
     },
@@ -68,7 +91,8 @@ const tools = [
     type: 'function',
     function: {
       name: 'search_prs',
-      description: 'Search all GitHub PRs by state, author, reviewer, repo, linked ticket key (e.g. XQ-3683), or title/number.',
+      description:
+        'Search the linked GitHub PRs in the dashboard data by state, author, reviewer, repo, linked ticket key, or title/number.',
       parameters: {
         type: 'object',
         properties: {
@@ -76,7 +100,7 @@ const tools = [
           author: { type: 'string' },
           reviewer: { type: 'string' },
           repo: { type: 'string' },
-          ticket_key: { type: 'string', describe: 'Associated Jira ticket key e.g. XQ-3683' },
+          ticket_key: { type: 'string', description: 'Associated Jira ticket key.' },
           number: { type: 'integer' },
         },
       },
@@ -86,7 +110,8 @@ const tools = [
     type: 'function',
     function: {
       name: 'fetch_live_github_prs',
-      description: 'Fetch live pull requests directly from GitHub REST API if data is missing from the dashboard bundle.',
+      description:
+        'Fetch live pull requests directly from GitHub REST API if data is missing from the dashboard bundle.',
       parameters: {
         type: 'object',
         properties: {
@@ -114,7 +139,8 @@ const tools = [
     type: 'function',
     function: {
       name: 'get_release_summary',
-      description: 'Calculate ticket count, planned story points, delivered actual points, and AI contribution for one or more releases.',
+      description:
+        'Calculate ticket count, planned story points, delivered actual points, and AI contribution for one or more releases.',
       parameters: {
         type: 'object',
         required: ['releases'],
@@ -131,7 +157,11 @@ const tools = [
       parameters: {
         type: 'object',
         properties: {
-          releases: { type: 'array', items: { type: 'string' }, description: 'Optional; restrict the snapshot to these release names.' },
+          releases: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'Optional; restrict the snapshot to these release names.',
+          },
           developer: { type: 'string', description: 'Optional; only this developer/metrics for them.' },
         },
       },
@@ -141,7 +171,8 @@ const tools = [
     type: 'function',
     function: {
       name: 'propose_jira_update',
-      description: 'Propose an update to a Jira ticket. This never writes data; the user must explicitly confirm the proposal.',
+      description:
+        'Propose an update to a Jira ticket. This never writes data; the user must explicitly confirm the proposal.',
       parameters: {
         type: 'object',
         required: ['issueKey', 'field', 'value'],
@@ -158,12 +189,12 @@ const tools = [
     function: {
       name: 'record_code_review',
       description:
-        'Record who spent how long reviewing a ticket. Returns a proposal the user must confirm; once confirmed, a Jira comment "{reviewer} spent {time} on code review" is added to the ticket. time_spent is a short human duration like "2h", "1d 4h", or "45m".',
+        'Record who spent how long reviewing a ticket. Returns a proposal the user must confirm; once confirmed, a comment naming the reviewer and time spent is added to the Jira ticket. time_spent is a short human duration like "2h", "1d 4h", or "45m".',
       parameters: {
         type: 'object',
         required: ['issueKey', 'reviewer', 'time_spent'],
         properties: {
-          issueKey: { type: 'string', description: 'Jira ticket key, e.g. XQ-4925.' },
+          issueKey: { type: 'string', description: 'Jira ticket key.' },
           reviewer: { type: 'string', description: 'Reviewer display name or GitHub login.' },
           time_spent: { type: 'string', description: 'Free-text duration, e.g. "2h" or "1d 4h".' },
           pr_number: { type: 'integer', description: 'Optional PR number the review was on.' },
@@ -174,8 +205,9 @@ const tools = [
 ];
 
 function requireApiKey() {
-  if (!process.env.AI_API_KEY) throw new Error('AI_API_KEY is not configured in environment.');
-  return process.env.AI_API_KEY;
+  const { apiKey } = getConfig().assistant;
+  if (!apiKey) throw new Error('AI_API_KEY is not configured in environment.');
+  return apiKey;
 }
 
 function compactTicket(ticket) {
@@ -190,7 +222,16 @@ function compactTicket(ticket) {
     ai_contribution_percent: ticket.ai_contribution_percent,
     releases: (ticket.fix_versions || []).map((version) => version.name),
     jira_url: ticket.jira_url,
-    linked_prs: (ticket.linked_prs || []).map((pr) => ({ id: pr.id, title: pr.title, repo: pr.repo, number: pr.number, state: pr.state })),
+    linked_prs: (ticket.linked_prs || []).map((pr) => ({
+      repo: pr.repo,
+      number: pr.pr_number,
+      title: pr.pr_title,
+      state: pr.pr_state,
+      url: pr.pr_url,
+      author: pr.pr_author_login ?? null,
+      reviewers: pr.pr_reviewers ?? [],
+      time_to_first_review_hours: pr.pr_time_to_first_review_hours ?? null,
+    })),
   };
 }
 
@@ -201,14 +242,20 @@ function allTickets(bundle) {
 function findDeveloper(ticket, value) {
   if (!value) return true;
   const needle = value.toLowerCase();
-  return [ticket.assignee_display_name, ticket.assignee_account_id]
-    .some((candidate) => String(candidate ?? '').toLowerCase().includes(needle));
+  return [ticket.assignee_display_name, ticket.assignee_account_id].some((candidate) =>
+    String(candidate ?? '')
+      .toLowerCase()
+      .includes(needle),
+  );
 }
 
 async function runTool(name, args, bundle) {
   if (name === 'search_tickets') {
     let tickets = allTickets(bundle);
-    if (args.release) tickets = tickets.filter((ticket) => (ticket.fix_versions || []).some((version) => version.name === args.release));
+    if (args.release)
+      tickets = tickets.filter((ticket) =>
+        (ticket.fix_versions || []).some((version) => version.name === args.release),
+      );
     if (args.developer) tickets = tickets.filter((ticket) => findDeveloper(ticket, args.developer));
     if (args.status) tickets = tickets.filter((ticket) => ticket.status?.toLowerCase() === args.status.toLowerCase());
     if (args.text) {
@@ -225,144 +272,79 @@ async function runTool(name, args, bundle) {
 
   if (name === 'search_prs') {
     const targetState = (args.state || 'all').toLowerCase();
-    const tickets = allTickets(bundle);
     const prMap = new Map();
-
-    const isPrOpen = (pr) => {
-      if (pr.is_open === true || pr.isOpen === true) return true;
-      if (pr.merged === false && pr.closed === false) return true;
-      const s = String(pr.state || pr.status || '').toLowerCase();
-      return s === 'open';
-    };
-
-    const getNormalizedState = (pr) => {
-      if (isPrOpen(pr)) return 'open';
-      const s = String(pr.state || pr.status || '').toLowerCase();
-      if (s.includes('merge')) return 'merged';
-      if (s.includes('close')) return 'closed';
-      return s || 'unknown';
-    };
-
-    const extractReviewers = (pr) => {
-      const revRaw = pr.reviewers || pr.code_reviewers || pr.reviewer_list || pr.requested_reviewers || pr.reviewer;
-      if (typeof revRaw === 'string') {
-        return revRaw.split(',').map((r) => r.trim()).filter(Boolean);
-      }
-      if (Array.isArray(revRaw)) {
-        return revRaw.map((r) => (typeof r === 'object' ? r.login || r.name || r.username : String(r))).filter(Boolean);
-      }
-      return [];
-    };
-
-    const addPrToMap = (pr, fallbackAuthor = '', fallbackTicketKey = '') => {
-      let repoName = pr.repo || pr.repository || pr.repo_name || pr.repository_name || '';
-      const prNumber = pr.number || pr.pr_number || pr.id;
-      if (!prNumber) return;
-
-      if (repoName.includes('client')) repoName = 'xiangqi-client';
-      if (repoName.includes('server')) repoName = 'xiangqi-server';
-
-      const key = `${repoName}#${prNumber}`;
-      if (!prMap.has(key)) {
-        prMap.set(key, {
-          id: pr.id || key,
-          number: Number(prNumber),
-          title: pr.title || pr.summary || pr.pr_title || '',
-          repo: repoName,
-          state: getNormalizedState(pr),
-          author: pr.author || pr.user?.login || pr.author_name || fallbackAuthor,
-          reviewers: extractReviewers(pr),
-          ticket_key: pr.ticket_key || pr.ticketKey || pr.jira_key || fallbackTicketKey,
-        });
-      }
-    };
-
-    for (const ticket of tickets) {
+    for (const ticket of allTickets(bundle)) {
       for (const pr of ticket.linked_prs || []) {
-        addPrToMap(pr, ticket.assignee_display_name, ticket.key);
-      }
-    }
-
-    const rootSources = [
-      bundle.all_release_tickets,
-      bundle.pr_review_duration,
-      bundle.code_review,
-      bundle.code_reviewers,
-      bundle.pull_requests,
-      bundle.prs,
-      bundle.github_prs,
-      bundle.all_prs,
-      bundle.open_prs,
-    ];
-
-    for (const source of rootSources) {
-      if (Array.isArray(source)) {
-        for (const pr of source) {
-          addPrToMap(pr);
-        }
-      } else if (source && typeof source === 'object') {
-        for (const pr of Object.values(source)) {
-          if (pr && typeof pr === 'object') addPrToMap(pr);
-        }
+        const key = `${pr.repo}#${pr.pr_number}`;
+        if (prMap.has(key)) continue;
+        prMap.set(key, {
+          id: key,
+          repo: pr.repo,
+          number: pr.pr_number,
+          title: pr.pr_title,
+          state: pr.pr_state,
+          url: pr.pr_url,
+          author: pr.pr_author_login ?? null,
+          assignee: pr.pr_assignee_login ?? null,
+          reviewers: pr.pr_reviewers ?? [],
+          ticket_key: ticket.key,
+          ticket_assignee: ticket.assignee_display_name ?? null,
+          created_at: pr.pr_created_at ?? null,
+          merged_at: pr.pr_merged_at ?? null,
+          time_to_first_review_hours: pr.pr_time_to_first_review_hours ?? null,
+          time_to_approval_hours: pr.pr_time_to_approval_hours ?? null,
+          review_completion_time_hours: pr.pr_review_completion_time_hours ?? null,
+        });
       }
     }
 
     let allPrs = Array.from(prMap.values());
-
-    if (targetState !== 'all') {
-      allPrs = allPrs.filter((pr) => pr.state === targetState);
-    }
-
+    if (targetState !== 'all') allPrs = allPrs.filter((pr) => pr.state === targetState);
     if (args.ticket_key) {
-      const needle = args.ticket_key.toLowerCase();
-      allPrs = allPrs.filter((pr) => String(pr.ticket_key || '').toLowerCase().includes(needle) || String(pr.title || '').toLowerCase().includes(needle));
+      const needle = String(args.ticket_key).toLowerCase();
+      allPrs = allPrs.filter(
+        (pr) =>
+          pr.ticket_key.toLowerCase() === needle ||
+          String(pr.title || '')
+            .toLowerCase()
+            .includes(needle),
+      );
     }
-
-    if (args.number) {
-      allPrs = allPrs.filter((pr) => Number(pr.number) === Number(args.number));
-    }
-
+    if (args.number) allPrs = allPrs.filter((pr) => Number(pr.number) === Number(args.number));
     if (args.author) {
-      const needle = args.author.toLowerCase();
-      allPrs = allPrs.filter((pr) => String(pr.author || '').toLowerCase().includes(needle));
+      const needle = String(args.author).toLowerCase();
+      allPrs = allPrs.filter((pr) =>
+        [pr.author, pr.assignee, pr.ticket_assignee].some((v) =>
+          String(v || '')
+            .toLowerCase()
+            .includes(needle),
+        ),
+      );
     }
-
     if (args.reviewer) {
-      const needle = args.reviewer.toLowerCase();
-      allPrs = allPrs.filter((pr) => (pr.reviewers || []).some((r) => String(r).toLowerCase().includes(needle)));
+      const needle = String(args.reviewer).toLowerCase();
+      allPrs = allPrs.filter((pr) => pr.reviewers.some((r) => String(r).toLowerCase().includes(needle)));
     }
-
     if (args.repo) {
-      const targetNeedle = normalizeRepoQuery(args.repo);
-      allPrs = allPrs.filter((pr) => String(pr.repo || '').toLowerCase().includes(targetNeedle));
+      const repo = matchConfiguredRepo(args.repo, getConfig().github.repos);
+      const needle = (repo ?? String(args.repo)).toLowerCase();
+      allPrs = allPrs.filter((pr) =>
+        String(pr.repo || '')
+          .toLowerCase()
+          .includes(needle),
+      );
     }
 
     const limit = 50;
-
-    return {
-      total_found: allPrs.length,
-      returned_count: Math.min(allPrs.length, limit),
-      prs: allPrs.slice(0, limit),
-    };
+    return { total_found: allPrs.length, returned_count: Math.min(allPrs.length, limit), prs: allPrs.slice(0, limit) };
   }
 
   if (name === 'fetch_live_github_prs') {
+    const { repos } = getConfig().github;
+    if (repos.length === 0) return { error: 'No GitHub repositories are configured (GITHUB_REPOS).' };
+    const targetRepo = matchConfiguredRepo(args.repo, repos) ?? repos[0];
     try {
-      const token = process.env.GITHUB_TOKEN;
-      const state = args.state || 'open';
-      const repoNeedle = normalizeRepoQuery(args.repo);
-      const targetRepo = repoNeedle === 'xiangqi-server' ? 'bvs-xiangqi/xiangqi-server' : 'bvs-xiangqi/xiangqi-client';
-      
-      const response = await fetch(`https://api.github.com/search/issues?q=type:pr+state:${state}+repo:${targetRepo}`, {
-        headers: {
-          Authorization: token ? `Bearer ${token}` : '',
-          'User-Agent': 'dev-metrics-dashboard',
-          Accept: 'application/vnd.github.v3+json',
-        },
-      });
-
-      if (!response.ok) throw new Error(`GitHub API ${response.status}`);
-      const data = await response.json();
+      const data = await searchPullRequests(targetRepo, args.state || 'open');
       return {
         target_repo: targetRepo,
         total_found: data.total_count,
@@ -381,23 +363,14 @@ async function runTool(name, args, bundle) {
 
   if (name === 'fetch_live_jira_issue') {
     try {
-      const jiraHost = process.env.JIRA_HOST;
-      const auth = Buffer.from(`${process.env.JIRA_EMAIL}:${process.env.JIRA_API_TOKEN}`).toString('base64');
-      
-      const response = await fetch(`${jiraHost}/rest/api/2/issue/${args.issueKey}`, {
-        headers: {
-          Authorization: `Basic ${auth}`,
-          Accept: 'application/json',
-        },
-      });
-
-      if (!response.ok) throw new Error(`Jira API ${response.status}`);
-      const data = await response.json();
+      const data = await fetchJiraIssue(assertIssueKey(args.issueKey));
       return {
         key: data.key,
         summary: data.fields?.summary,
         status: data.fields?.status?.name,
         assignee: data.fields?.assignee?.displayName,
+        issue_type: data.fields?.issuetype?.name,
+        fix_versions: (data.fields?.fixVersions || []).map((v) => v.name),
       };
     } catch (err) {
       return { error: `Failed to fetch live Jira issue: ${err.message}` };
@@ -444,14 +417,20 @@ async function runTool(name, args, bundle) {
       for (const v of t.fix_versions || []) {
         if (!releaseMap.has(v.name)) releaseMap.set(v.name, { name: v.name, tickets: 0, sp: 0, ap: 0 });
         const r = releaseMap.get(v.name);
-        r.tickets += 1; r.sp += toNum(t.sp); r.ap += toNum(t.ap);
+        r.tickets += 1;
+        r.sp += toNum(t.sp);
+        r.ap += toNum(t.ap);
       }
       const d = ensureDev(t);
-      d.tickets += 1; d.sp += toNum(t.sp); d.ap += toNum(t.ap);
+      d.tickets += 1;
+      d.sp += toNum(t.sp);
+      d.ap += toNum(t.ap);
       if (typeof t.ai_contribution_percent === 'number') d.ai.push(t.ai_contribution_percent);
       if (t.status_category in statuses) statuses[t.status_category].count += 1;
       const ty = ensureType(t);
-      ty.tickets += 1; ty.sp += toNum(t.sp); ty.ap += toNum(t.ap);
+      ty.tickets += 1;
+      ty.sp += toNum(t.sp);
+      ty.ap += toNum(t.ap);
     }
 
     const developers = [...devMap.values()]
@@ -487,12 +466,21 @@ async function runTool(name, args, bundle) {
 
   if (name === 'record_code_review') {
     const issueKey = String(args.issueKey ?? '').trim();
-    const reviewer = String(args.reviewer ?? '').replace(/[\r\n]+/g, ' ').trim().slice(0, 80);
-    const timeSpent = String(args.time_spent ?? '').replace(/[\r\n]+/g, ' ').trim().slice(0, 40);
+    const reviewer = String(args.reviewer ?? '')
+      .replace(/[\r\n]+/g, ' ')
+      .trim()
+      .slice(0, 80);
+    const timeSpent = String(args.time_spent ?? '')
+      .replace(/[\r\n]+/g, ' ')
+      .trim()
+      .slice(0, 40);
     const prNumber = Number.isInteger(args.pr_number) ? args.pr_number : null;
     const ticket = bundle.tickets?.[issueKey];
     if (!ticket) throw new Error(`Ticket ${issueKey} is not in the current dashboard data.`);
-    if (!reviewer || !timeSpent) throw new Error('Both reviewer and time_spent are required. Use record_code_review(issueKey, reviewer, time_spent).');
+    if (!reviewer || !timeSpent)
+      throw new Error(
+        'Both reviewer and time_spent are required. Use record_code_review(issueKey, reviewer, time_spent).',
+      );
     return {
       confirmation_required: true,
       action: { type: 'review_comment', issueKey, reviewer, time_spent: timeSpent, pr_number: prNumber },
@@ -504,7 +492,7 @@ async function runTool(name, args, bundle) {
 }
 
 async function callModel(messages, model) {
-  const baseUrl = (process.env.AI_BASE_URL || DEFAULT_AI_BASE_URL).replace(/\/$/, '');
+  const { baseUrl } = getConfig().assistant;
   const apiKey = requireApiKey();
   const response = await fetch(`${baseUrl}/chat/completions`, {
     method: 'POST',
@@ -554,10 +542,8 @@ function rateLimitWaitSeconds(error) {
 async function getModelCandidates(baseUrl, apiKey) {
   if (modelCandidates?.baseUrl === baseUrl) return modelCandidates.names;
 
-  const configuredModel = process.env.AI_MODEL || DEFAULT_MODEL;
-  let names = [configuredModel, ...FALLBACK_MODELS].filter(
-    (name) => !NON_CHAT_MODEL_PATTERN.test(name),
-  );
+  const configuredModel = getConfig().assistant.model;
+  let names = [configuredModel, ...FALLBACK_MODELS].filter((name) => !NON_CHAT_MODEL_PATTERN.test(name));
   try {
     const response = await fetch(`${baseUrl}/models`, {
       headers: { Authorization: `Bearer ${apiKey}` },
@@ -589,7 +575,7 @@ function pickModel(candidates, used) {
 
 async function resolveModel(baseUrl, apiKey) {
   const candidates = await getModelCandidates(baseUrl, apiKey);
-  const configuredModel = process.env.AI_MODEL || DEFAULT_MODEL;
+  const configuredModel = getConfig().assistant.model;
   const model = candidates.includes(configuredModel) ? configuredModel : candidates[0];
   if (lastSelectedModel && candidates.includes(lastSelectedModel)) return lastSelectedModel;
   lastSelectedModel = model;
@@ -605,26 +591,42 @@ export async function answerAssistantQuestion(bundle, messages) {
       content: String(msg.content),
     }));
 
+  const config = getConfig();
+  const repoList = config.github.repos.length
+    ? `Repositories: ${config.github.repos.map((r) => r.split('/')[1]).join(', ')}. `
+    : 'No GitHub repositories are configured; PR tools will return nothing. ';
+  const pointsGlossary = config.features.actualPoints
+    ? 'Planned SP = estimated story points; Delivered AP = actual points. '
+    : 'Planned SP = estimated story points; actual points are not tracked on this project. ';
+  const aiGlossary = config.features.aiContribution
+    ? 'AI contribution is 0-100%. '
+    : 'AI contribution is not tracked on this project. ';
+
   const conversation = [
     {
       role: 'system',
       content:
-        'You are the Engineering Delivery & AI Insights assistant for the Xiangqi team. Answer ONLY from data returned by your tools — never invent numbers. ' +
-        'Use exact tool names: search_tickets, search_prs, get_release_summary, get_delivery_snapshot, propose_jira_update, fetch_live_github_prs, fetch_live_jira_issue. ' +
-        'Repositories: xiangqi-client (FE/Client) and xiangqi-server (BE/Server). Planned SP = estimated story points; Delivered AP = actual points; AI contribution is 0-100%. ' +
+        `You are the engineering delivery assistant for the ${config.project.name} team (Jira project ${config.project.key}). Answer ONLY from data returned by your tools — never invent numbers. ` +
+        'Use exact tool names: search_tickets, search_prs, get_release_summary, get_delivery_snapshot, propose_jira_update, record_code_review, fetch_live_github_prs, fetch_live_jira_issue. ' +
+        repoList +
+        pointsGlossary +
+        aiGlossary +
         'Answer style: lead with one crisp takeaway sentence, then 2-5 tight bullets (bold key numbers with ** **). Keep it under ~110 words. ' +
         'When you answer a numeric comparison across categories (developers, releases, statuses, or issue types), append ONE chart block so the UI can render a bar chart. ' +
         'Use this exact format (code-fence labelled chart, JSON on the same lines):\n' +
-        '```chart\n{"title":"Planned vs Delivered by Release","categories":["8.1.0","8.6.0"],"series":[{"name":"Planned SP","values":[10,24]},{"name":"Delivered AP","values":[8,21]}]}\n```\n' +
+        '```chart\n{"title":"Planned vs Delivered by Release","categories":["1.1.0","1.2.0"],"series":[{"name":"Planned SP","values":[10,24]},{"name":"Delivered AP","values":[8,21]}]}\n```\n' +
         'Chart rules: values must be numbers; categories length must equal each series values length; title is short; up to 3 series. ' +
         'If the data is a single fact or you are unsure, skip the chart and just answer in prose. ' +
         'For evidence links (GitHub PR or Jira URLs) always use normal markdown links [text](https://...) — never image syntax ![](url), since those pages are not images and would render broken. ' +
-        'Propose Jira changes only through propose_jira_update or record_code_review and never claim a write happened.',
+        'Propose Jira changes only through propose_jira_update or record_code_review and never claim a write happened. ' +
+        (config.assistant.extraInstructions
+          ? `Additional project guidance: ${config.assistant.extraInstructions} `
+          : ''),
     },
     ...formattedHistory,
   ];
 
-  const aiBaseUrl = (process.env.AI_BASE_URL || DEFAULT_AI_BASE_URL).replace(/\/$/, '');
+  const aiBaseUrl = config.assistant.baseUrl;
   const apiKey = requireApiKey();
   const candidates = await getModelCandidates(aiBaseUrl, apiKey);
   const usedModels = new Set();
@@ -644,15 +646,19 @@ export async function answerAssistantQuestion(bundle, messages) {
         usedModels.add(model);
         const next = pickModel(candidates, usedModels);
         if (!next) {
-          throw new Error(unsupportedModel
-            ? 'No chat-capable AI model is available for the configured provider. Check the AI_MODEL and AI_BASE_URL settings.'
-            : 'The AI provider is rate-limited on every available free model right now. Please wait a few seconds and ask again.');
+          throw new Error(
+            unsupportedModel
+              ? 'No chat-capable AI model is available for the configured provider. Check the AI_MODEL and AI_BASE_URL settings.'
+              : 'The AI provider is rate-limited on every available free model right now. Please wait a few seconds and ask again.',
+          );
         }
         model = next;
         lastSelectedModel = next;
       }
     }
-    throw new Error('The AI provider is rate-limited on every available free model right now. Please wait a few seconds and ask again.');
+    throw new Error(
+      'The AI provider is rate-limited on every available free model right now. Please wait a few seconds and ask again.',
+    );
   }
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round += 1) {
@@ -717,21 +723,31 @@ export async function applyAssistantUpdate(action, bundle, refresh) {
 
   // Review-comment action: posts "{reviewer} spent {time} on code review".
   if (action.type === 'review_comment') {
-    const reviewer = String(action.reviewer ?? '').replace(/[\r\n]+/g, ' ').trim().slice(0, 80);
-    const timeSpent = String(action.time_spent ?? '').replace(/[\r\n]+/g, ' ').trim().slice(0, 40);
-    if (!bundle.tickets?.[action.issueKey]) throw new Error(`Ticket ${action.issueKey} is not present in the current dashboard data.`);
-    if (!reviewer || !timeSpent) throw new Error('Invalid review comment action: reviewer and time_spent are required.');
-    const comment = `${reviewer} spent ${timeSpent} on code review`;
-    await postJiraComment(action.issueKey, comment);
+    const issueKey = assertIssueKey(action.issueKey);
+    const reviewer = String(action.reviewer ?? '')
+      .replace(/[\r\n]+/g, ' ')
+      .trim()
+      .slice(0, 80);
+    const timeSpent = String(action.time_spent ?? '')
+      .replace(/[\r\n]+/g, ' ')
+      .trim()
+      .slice(0, 40);
+    if (!bundle.tickets?.[issueKey])
+      throw new Error(`Ticket ${issueKey} is not present in the current dashboard data.`);
+    if (!reviewer || !timeSpent)
+      throw new Error('Invalid review comment action: reviewer and time_spent are required.');
+    const comment = formatReviewComment(reviewer, timeSpent);
+    await postJiraComment(issueKey, comment);
     if (refresh) await refresh();
-    return { issueKey: action.issueKey, type: 'review_comment', comment };
+    return { issueKey, type: 'review_comment', comment };
   }
 
+  const issueKey = assertIssueKey(action.issueKey);
   if (!EDITABLE_FIELDS.has(action.field)) throw new Error('Invalid assistant update action.');
-  if (!bundle.tickets?.[action.issueKey]) throw new Error(`Ticket ${action.issueKey} is not present in the current dashboard data.`);
+  if (!bundle.tickets?.[issueKey]) throw new Error(`Ticket ${issueKey} is not present in the current dashboard data.`);
 
-  await updateJiraIssueField(action.issueKey, action.field, action.value);
-  await refresh();
+  await updateJiraIssueField(issueKey, action.field, action.value);
+  if (refresh) await refresh();
 
-  return { issueKey: action.issueKey, field: action.field, value: action.value };
+  return { issueKey, field: action.field, value: action.value };
 }

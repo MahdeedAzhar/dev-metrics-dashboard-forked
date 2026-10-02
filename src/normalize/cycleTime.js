@@ -1,34 +1,34 @@
-const IN_PROGRESS_STATUS = 'In Progress';
-const CODE_REVIEW_STATUS = 'Code Review';
-
 /**
  * Derives "how long did it take this ticket to reach code review" from its raw
- * Jira changelog (GET /rest/api/3/issue/{key}/changelog — NOT available via the
- * bulk search endpoint, confirmed live). Uses the FIRST transition into
- * "In Progress" and the FIRST transition into "Code Review" *after* that —
- * tickets in this workflow can cycle Code Review <-> Internal QA multiple times
- * before finishing (confirmed on real data), so later re-entries into Code
- * Review must be ignored, not averaged in or taken as the last occurrence.
+ * Jira changelog. Uses the FIRST transition into any configured "in progress"
+ * status and the FIRST transition into any configured "code review" status
+ * *after* that — tickets can bounce between review and QA several times, so
+ * later re-entries into review are ignored rather than averaged in.
  *
- * Either transition missing (ticket never reached that status, or — a known,
- * disclosed limitation — was created directly into "In Progress" with no
- * recorded transition into it) leaves the corresponding field(s) `null` rather
- * than estimating a duration.
+ * Either transition missing (never reached that status, or — a known and
+ * documented limitation — created directly into "In Progress" with no recorded
+ * transition) leaves the corresponding field(s) `null` rather than estimating.
+ *
+ * Status names are case-insensitive and come from JIRA_IN_PROGRESS_STATUSES /
+ * JIRA_CODE_REVIEW_STATUSES so teams with different workflows can map their own.
  */
-export function deriveCycleTimeFromChangelog(changelogValues) {
+export function deriveCycleTimeFromChangelog(changelogValues, { inProgressStatuses, codeReviewStatuses }) {
+  const inProgress = new Set(inProgressStatuses.map((s) => s.toLowerCase()));
+  const codeReview = new Set(codeReviewStatuses.map((s) => s.toLowerCase()));
+
   const statusTransitions = (changelogValues ?? [])
     .flatMap((entry) =>
       (entry.items ?? [])
         .filter((item) => item.field === 'status')
-        .map((item) => ({ at: new Date(entry.created), toStatus: item.toString })),
+        .map((item) => ({ at: new Date(entry.created), toStatus: String(item.toString ?? '').toLowerCase() })),
     )
     .sort((a, b) => a.at.getTime() - b.at.getTime());
 
-  const firstInProgress = statusTransitions.find((t) => t.toStatus === IN_PROGRESS_STATUS);
+  const firstInProgress = statusTransitions.find((t) => inProgress.has(t.toStatus));
   const firstInProgressAt = firstInProgress ? firstInProgress.at : null;
 
   const firstCodeReviewAfter = firstInProgressAt
-    ? statusTransitions.find((t) => t.toStatus === CODE_REVIEW_STATUS && t.at > firstInProgressAt)
+    ? statusTransitions.find((t) => codeReview.has(t.toStatus) && t.at > firstInProgressAt)
     : undefined;
   const firstCodeReviewAt = firstCodeReviewAfter ? firstCodeReviewAfter.at : null;
 

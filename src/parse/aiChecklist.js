@@ -1,11 +1,24 @@
-const SECTION_HEADING_RE = /####\s*AI Contribution Checklist/i;
-const NEXT_HEADING_RE = /\n####\s/;
+const DEFAULT_HEADING = 'AI Contribution Checklist';
+// The section may be introduced by any markdown heading level (#### by
+// convention) or a bold line; it ends at the next heading of any level.
+const NEXT_HEADING_RE = /\n#{1,6}\s/;
 const STATED_SCORE_RE = /\*\*AI Contribution Score:?\*\*\s*:?\s*([\d]+(?:\.\d+)?)\s*%/i;
+
+function escapeRegex(text) {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function sectionHeadingRe(heading) {
+  return new RegExp(`(?:^|\\n)\\s*(?:#{1,6}\\s*|\\*\\*)?${escapeRegex(heading)}`, 'i');
+}
 
 const BLANK_CELL_VALUES = new Set(['', '-', '_', 'n/a', 'na', 'tbd']);
 
 function stripMarkup(cell) {
-  return cell.replace(/\*\*/g, '').replace(/^_+|_+$/g, '').trim();
+  return cell
+    .replace(/\*\*/g, '')
+    .replace(/^_+|_+$/g, '')
+    .trim();
 }
 
 function parseNumericCell(rawCell) {
@@ -15,8 +28,8 @@ function parseNumericCell(rawCell) {
   return Number.isNaN(value) ? null : value;
 }
 
-function extractSection(body) {
-  const headingMatch = SECTION_HEADING_RE.exec(body ?? '');
+function extractSection(body, heading) {
+  const headingMatch = sectionHeadingRe(heading).exec(body ?? '');
   if (!headingMatch) return null;
   const rest = body.slice(headingMatch.index + headingMatch[0].length);
   const nextHeadingMatch = NEXT_HEADING_RE.exec(rest);
@@ -52,7 +65,9 @@ function parseActivityRows(section) {
 }
 
 /**
- * Parses the AI Contribution Checklist embedded in a PR body. Tolerates a missing
+ * Parses the AI Contribution Checklist embedded in a PR body (see
+ * docs/AI_CONTRIBUTION.md for the expected table). The section heading text is
+ * configurable via AI_CHECKLIST_HEADING. Tolerates a missing
  * table, missing individual fields, and blank rows (activity not performed) without
  * throwing — those cases surface as `available: false` or `ai_percent: null`,
  * never coerced to 0. The explicit stated score line is trusted over recomputing
@@ -60,8 +75,8 @@ function parseActivityRows(section) {
  * required to — activities can be added to the table without updating the line,
  * or vice versa).
  */
-export function parseAiChecklist(body) {
-  const section = extractSection(body);
+export function parseAiChecklist(body, { heading = DEFAULT_HEADING } = {}) {
+  const section = extractSection(body, heading);
   const activities = parseActivityRows(section);
 
   const statedMatch = STATED_SCORE_RE.exec(body ?? '');
@@ -74,9 +89,7 @@ export function parseAiChecklist(body) {
     };
   }
 
-  const filledActivities = activities.filter(
-    (a) => a.weight !== null && a.score !== null,
-  );
+  const filledActivities = activities.filter((a) => a.weight !== null && a.score !== null);
   const weightSum = filledActivities.reduce((sum, a) => sum + a.weight, 0);
   if (filledActivities.length > 0 && weightSum > 0) {
     const scoreSum = filledActivities.reduce((sum, a) => sum + a.score, 0);

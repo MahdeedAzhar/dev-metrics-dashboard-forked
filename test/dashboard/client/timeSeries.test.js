@@ -45,7 +45,13 @@ function pr(overrides) {
 // --- generic primitives ---
 
 test('bucketByDay fills every day in the range, including zero-count days', () => {
-  const buckets = bucketByDay(['2026-07-01T00:00:00Z'], (d) => d, () => 1, '2026-07-01', '2026-07-03');
+  const buckets = bucketByDay(
+    ['2026-07-01T00:00:00Z'],
+    (d) => d,
+    () => 1,
+    '2026-07-01',
+    '2026-07-03',
+  );
   assert.deepEqual(buckets, [
     { date: '2026-07-01', value: 1 },
     { date: '2026-07-02', value: 0 },
@@ -54,14 +60,29 @@ test('bucketByDay fills every day in the range, including zero-count days', () =
 });
 
 test('bucketByDay sums a numeric value per day instead of just counting when given a value accessor', () => {
-  const items = [{ d: '2026-07-01T00:00:00Z', v: 3 }, { d: '2026-07-01T12:00:00Z', v: 2 }];
-  const buckets = bucketByDay(items, (i) => i.d, (i) => i.v, '2026-07-01', '2026-07-01');
+  const items = [
+    { d: '2026-07-01T00:00:00Z', v: 3 },
+    { d: '2026-07-01T12:00:00Z', v: 2 },
+  ];
+  const buckets = bucketByDay(
+    items,
+    (i) => i.d,
+    (i) => i.v,
+    '2026-07-01',
+    '2026-07-01',
+  );
   assert.equal(buckets[0].value, 5);
 });
 
 test('bucketByDay skips items with no date and items outside the range without throwing', () => {
   const items = [{ d: null }, { d: '2020-01-01T00:00:00Z' }];
-  const buckets = bucketByDay(items, (i) => i.d, () => 1, '2026-07-01', '2026-07-01');
+  const buckets = bucketByDay(
+    items,
+    (i) => i.d,
+    () => 1,
+    '2026-07-01',
+    '2026-07-01',
+  );
   assert.equal(buckets[0].value, 0);
 });
 
@@ -71,7 +92,10 @@ test('cumulativeSeries produces a running total', () => {
     { date: '2026-07-02', value: 0 },
     { date: '2026-07-03', value: 3 },
   ]);
-  assert.deepEqual(result.map((r) => r.value), [2, 2, 5]);
+  assert.deepEqual(
+    result.map((r) => r.value),
+    [2, 2, 5],
+  );
 });
 
 test('computeMean/computeMedian exclude non-numeric values and return null (not 0) when nothing remains', () => {
@@ -83,7 +107,10 @@ test('computeMean/computeMedian exclude non-numeric values and return null (not 
 });
 
 test('computeHistogramBuckets counts values into fixed ranges', () => {
-  const ranges = [{ label: 'low', min: 0, max: 10 }, { label: 'high', min: 10, max: Infinity }];
+  const ranges = [
+    { label: 'low', min: 0, max: 10 },
+    { label: 'high', min: 10, max: Infinity },
+  ];
   const buckets = computeHistogramBuckets([5, 15, 8, 20], ranges);
   assert.equal(buckets.find((b) => b.label === 'low').count, 2);
   assert.equal(buckets.find((b) => b.label === 'high').count, 2);
@@ -137,7 +164,12 @@ test('buildEngineeringActivityTrend dedupes a PR that somehow attaches to two ti
 
 test('buildPrActivityTrend reports currently-open count, average age, and a team-level stale list', () => {
   const oldOpenPr = pr({ pr_number: 1, pr_state: 'open', pr_created_at: '2026-06-01T00:00:00Z', pr_merged_at: null });
-  const recentOpenPr = pr({ pr_number: 2, pr_state: 'open', pr_created_at: '2026-07-25T00:00:00Z', pr_merged_at: null });
+  const recentOpenPr = pr({
+    pr_number: 2,
+    pr_state: 'open',
+    pr_created_at: '2026-07-25T00:00:00Z',
+    pr_merged_at: null,
+  });
   const tickets = [ticket({ linked_prs: [oldOpenPr, recentOpenPr] })];
   const trend = buildPrActivityTrend(tickets, '2026-07-30T00:00:00Z', 14);
   assert.equal(trend.currently_open_count, 2);
@@ -154,8 +186,28 @@ test('buildPrActivityTrend never attributes a stale PR to a developer (team-leve
 
 test('buildPrActivityTrend breaks PR counts out by repository', () => {
   const tickets = [
-    ticket({ linked_prs: [pr({ repo: 'bvs-xiangqi/xiangqi-client', pr_number: 1, pr_state: 'merged', pr_created_at: '2026-07-01T00:00:00Z', pr_merged_at: '2026-07-02T00:00:00Z' })] }),
-    ticket({ linked_prs: [pr({ repo: 'bvs-xiangqi/xiangqi-server', pr_number: 2, pr_state: 'open', pr_created_at: '2026-07-01T00:00:00Z', pr_merged_at: null })] }),
+    ticket({
+      linked_prs: [
+        pr({
+          repo: 'bvs-xiangqi/xiangqi-client',
+          pr_number: 1,
+          pr_state: 'merged',
+          pr_created_at: '2026-07-01T00:00:00Z',
+          pr_merged_at: '2026-07-02T00:00:00Z',
+        }),
+      ],
+    }),
+    ticket({
+      linked_prs: [
+        pr({
+          repo: 'bvs-xiangqi/xiangqi-server',
+          pr_number: 2,
+          pr_state: 'open',
+          pr_created_at: '2026-07-01T00:00:00Z',
+          pr_merged_at: null,
+        }),
+      ],
+    }),
   ];
   const trend = buildPrActivityTrend(tickets, '2026-07-03T00:00:00Z', 14);
   const client = trend.repo_breakdown.find((item) => item.repo === 'bvs-xiangqi/xiangqi-client');
@@ -166,7 +218,7 @@ test('buildPrActivityTrend breaks PR counts out by repository', () => {
   assert.equal(server.merged_count, 0);
 });
 
-test('buildDeveloperActivityTimeline scopes to one developer\'s own tickets only', () => {
+test("buildDeveloperActivityTimeline scopes to one developer's own tickets only", () => {
   const tickets = [
     ticket({ assignee_account_id: 'dev-a', resolved_at: '2026-07-05T00:00:00Z' }),
     ticket({ assignee_account_id: 'dev-b', resolved_at: '2026-07-05T00:00:00Z' }),

@@ -1,8 +1,5 @@
-import {
-  jiraStoryPointsFieldId,
-  jiraActualPointsFieldId,
-  jiraAiContributionFieldId,
-} from '../../config/config.js';
+import { getConfig } from '../config/index.js';
+import { fromJiraAiValue } from '../fetch/jira.js';
 import { deriveCycleTimeFromChangelog } from './cycleTime.js';
 
 function toNumber(value) {
@@ -10,24 +7,24 @@ function toNumber(value) {
 }
 
 /**
- * Shapes a raw Jira issue (from fetch/jira.js's fetchTicketsByFixVersions) into
- * the ticket record the dashboard is built around. `prIndex` is a
- * Map<ticketKey, evidence[]> from merge/ticketPrIndex.js — a ticket with no
- * entry gets an empty array (no linked PR is neutral, never a negative signal).
- * `changelogByKey` is a Map<ticketKey, changelogValues[]> (see
- * fetch/jiraChangelog.js) — a ticket with no entry gets an empty changelog,
- * which deriveCycleTimeFromChangelog already treats as "never transitioned",
- * not an error.
+ * Shapes a raw Jira issue into the ticket record the dashboard is built around.
  *
- * The AI Contribution Percentage field is stored in Jira as a 0-1 fraction
- * (confirmed live against real tickets), so it's ×100'd here — but only when
- * present; `0` is a real, valid value ("confirmed zero AI use") and must not be
- * confused with `null` ("not recorded").
+ * - `prIndex`: Map<ticketKey, evidence[]> from merge/ticketPrIndex.js. A ticket
+ *   with no entry gets an empty array — no linked PR is neutral, never negative.
+ * - `changelogByKey`: Map<ticketKey, changelogValues[]>. A missing entry means
+ *   "never transitioned", not an error.
+ *
+ * `0` is a real value ("confirmed zero") for every numeric field and must never
+ * be confused with `null` ("not recorded"). Fields the project hasn't
+ * configured (actual points, AI contribution) are always `null`.
  */
-export function normalizeJiraIssue(issue, prIndex, jiraBaseUrl, changelogByKey = new Map()) {
+export function normalizeJiraIssue(issue, prIndex, changelogByKey = new Map(), config = getConfig()) {
   const fields = issue.fields ?? {};
-  const aiFraction = toNumber(fields[jiraAiContributionFieldId]);
-  const cycleTime = deriveCycleTimeFromChangelog(changelogByKey.get(issue.key));
+  const { fields: fieldIds, statuses, baseUrl } = config.jira;
+  const cycleTime = deriveCycleTimeFromChangelog(changelogByKey.get(issue.key), {
+    inProgressStatuses: statuses.inProgress,
+    codeReviewStatuses: statuses.codeReview,
+  });
 
   return {
     key: issue.key,
@@ -37,9 +34,11 @@ export function normalizeJiraIssue(issue, prIndex, jiraBaseUrl, changelogByKey =
     status_category: fields.status?.statusCategory?.key ?? null,
     assignee_display_name: fields.assignee?.displayName ?? null,
     assignee_account_id: fields.assignee?.accountId ?? null,
-    sp: toNumber(fields[jiraStoryPointsFieldId]),
-    ap: toNumber(fields[jiraActualPointsFieldId]),
-    ai_contribution_percent: aiFraction === null ? null : aiFraction * 100,
+    sp: toNumber(fields[fieldIds.storyPoints]),
+    ap: fieldIds.actualPoints ? toNumber(fields[fieldIds.actualPoints]) : null,
+    ai_contribution_percent: fieldIds.aiContribution
+      ? fromJiraAiValue(toNumber(fields[fieldIds.aiContribution]), config)
+      : null,
     fix_versions: (fields.fixVersions ?? []).map((v) => ({
       id: v.id,
       name: v.name,
@@ -47,8 +46,9 @@ export function normalizeJiraIssue(issue, prIndex, jiraBaseUrl, changelogByKey =
       release_date: v.releaseDate ?? null,
     })),
     created_at: fields.created ?? null,
+    updated_at: fields.updated ?? null,
     resolved_at: fields.resolutiondate ?? null,
-    jira_url: `${jiraBaseUrl}/browse/${issue.key}`,
+    jira_url: `${baseUrl}/browse/${issue.key}`,
     linked_prs: prIndex.get(issue.key) ?? [],
     first_in_progress_at: cycleTime.first_in_progress_at,
     first_code_review_at_after_in_progress: cycleTime.first_code_review_at_after_in_progress,

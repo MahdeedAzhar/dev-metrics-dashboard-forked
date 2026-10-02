@@ -1,6 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { deriveCycleTimeFromChangelog } from '../../src/normalize/cycleTime.js';
+import { deriveCycleTimeFromChangelog as derive } from '../../src/normalize/cycleTime.js';
+
+const STATUSES = { inProgressStatuses: ['In Progress'], codeReviewStatuses: ['Code Review'] };
+const deriveCycleTimeFromChangelog = (values) => derive(values, STATUSES);
 
 function statusEntry(created, fromString, toString) {
   return { created, items: [{ field: 'status', fromString, toString }] };
@@ -24,10 +27,7 @@ const REAL_XQ_4821_CHANGELOG = [
 test('derives the first In Progress -> first Code Review transition from a real changelog', () => {
   const result = deriveCycleTimeFromChangelog(REAL_XQ_4821_CHANGELOG);
   assert.equal(result.first_in_progress_at, new Date('2026-07-05T21:02:13.787+0500').toISOString());
-  assert.equal(
-    result.first_code_review_at_after_in_progress,
-    new Date('2026-07-07T12:12:43.923+0500').toISOString(),
-  );
+  assert.equal(result.first_code_review_at_after_in_progress, new Date('2026-07-07T12:12:43.923+0500').toISOString());
   // ~1 day, 15h11m ≈ 39.18 hours
   assert.ok(Math.abs(result.in_progress_to_code_review_hours - 39.18) < 0.1);
 });
@@ -36,7 +36,10 @@ test('ignores later re-entries into Code Review after Internal QA cycling', () =
   const result = deriveCycleTimeFromChangelog(REAL_XQ_4821_CHANGELOG);
   // The second and third "-> Code Review" transitions (after Internal QA) must
   // NOT be used — the derived timestamp must match the FIRST one only.
-  assert.notEqual(result.first_code_review_at_after_in_progress, new Date('2026-07-13T13:41:40.728+0500').toISOString());
+  assert.notEqual(
+    result.first_code_review_at_after_in_progress,
+    new Date('2026-07-13T13:41:40.728+0500').toISOString(),
+  );
 });
 
 test('returns all nulls when the ticket never reached In Progress', () => {
@@ -86,4 +89,22 @@ test('ignores changelog entries unrelated to status (e.g. Fix Version changes)',
   ];
   const result = deriveCycleTimeFromChangelog(changelog);
   assert.ok(result.first_in_progress_at);
+});
+
+test('status mapping is configurable and case-insensitive', () => {
+  const changelog = [
+    {
+      created: '2026-07-01T09:00:00.000+0000',
+      items: [{ field: 'status', fromString: 'To Do', toString: 'development' }],
+    },
+    {
+      created: '2026-07-02T09:00:00.000+0000',
+      items: [{ field: 'status', fromString: 'development', toString: 'IN REVIEW' }],
+    },
+  ];
+  const result = derive(changelog, {
+    inProgressStatuses: ['Development', 'In Progress'],
+    codeReviewStatuses: ['In Review'],
+  });
+  assert.equal(result.in_progress_to_code_review_hours, 24);
 });

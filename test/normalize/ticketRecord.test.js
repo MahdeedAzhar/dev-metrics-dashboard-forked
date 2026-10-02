@@ -1,12 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { normalizeJiraIssue } from '../../src/normalize/ticketRecord.js';
+import { testConfig } from '../helpers/config.js';
 
-const BASE_URL = 'https://arbisoft.atlassian.net';
+const CONFIG = testConfig({ JIRA_BASE_URL: 'https://arbisoft.atlassian.net', JIRA_PROJECT_KEY: 'XQ' });
 
-// Field shapes below are modeled on real tickets confirmed live against Jira
-// (XQ-4821, XQ-5065) during this project's build, including the exact
-// customfield IDs and the AI Contribution field's 0-1 fraction storage.
+// Field shapes below are modeled on real Jira Cloud tickets, including the
+// customfield IDs from the test config and an AI Contribution field stored as
+// a 0-1 fraction (JIRA_AI_CONTRIBUTION_SCALE=fraction).
 const DONE_TICKET = {
   key: 'XQ-4821',
   fields: {
@@ -39,12 +40,12 @@ const IN_PROGRESS_TICKET_NO_AP_YET = {
 };
 
 test('normalizeJiraIssue converts the AI Contribution fraction to a 0-100 percent', () => {
-  const record = normalizeJiraIssue(DONE_TICKET, new Map(), BASE_URL);
+  const record = normalizeJiraIssue(DONE_TICKET, new Map(), new Map(), CONFIG);
   assert.equal(record.ai_contribution_percent, 87);
 });
 
 test('normalizeJiraIssue extracts SP/AP correctly and derives status_category from statusCategory.key', () => {
-  const record = normalizeJiraIssue(DONE_TICKET, new Map(), BASE_URL);
+  const record = normalizeJiraIssue(DONE_TICKET, new Map(), new Map(), CONFIG);
   assert.equal(record.sp, 2);
   assert.equal(record.ap, 3);
   assert.equal(record.status, 'Done');
@@ -53,12 +54,12 @@ test('normalizeJiraIssue extracts SP/AP correctly and derives status_category fr
 });
 
 test('normalizeJiraIssue keeps a null AP as null, never coerced to 0', () => {
-  const record = normalizeJiraIssue(IN_PROGRESS_TICKET_NO_AP_YET, new Map(), BASE_URL);
+  const record = normalizeJiraIssue(IN_PROGRESS_TICKET_NO_AP_YET, new Map(), new Map(), CONFIG);
   assert.equal(record.ap, null);
 });
 
 test('normalizeJiraIssue keeps a genuine 0% AI contribution as 0, not null', () => {
-  const record = normalizeJiraIssue(IN_PROGRESS_TICKET_NO_AP_YET, new Map(), BASE_URL);
+  const record = normalizeJiraIssue(IN_PROGRESS_TICKET_NO_AP_YET, new Map(), new Map(), CONFIG);
   assert.equal(record.ai_contribution_percent, 0);
 });
 
@@ -67,13 +68,13 @@ test('normalizeJiraIssue treats a missing AI Contribution field as null, not 0',
     key: 'XQ-9999',
     fields: { ...DONE_TICKET.fields, customfield_11729: null },
   };
-  const record = normalizeJiraIssue(ticket, new Map(), BASE_URL);
+  const record = normalizeJiraIssue(ticket, new Map(), new Map(), CONFIG);
   assert.equal(record.ai_contribution_percent, null);
 });
 
 test('normalizeJiraIssue handles an unassigned ticket without throwing', () => {
   const ticket = { key: 'XQ-1111', fields: { ...DONE_TICKET.fields, assignee: null } };
-  const record = normalizeJiraIssue(ticket, new Map(), BASE_URL);
+  const record = normalizeJiraIssue(ticket, new Map(), new Map(), CONFIG);
   assert.equal(record.assignee_display_name, null);
   assert.equal(record.assignee_account_id, null);
 });
@@ -89,7 +90,7 @@ test('normalizeJiraIssue preserves multiple fix versions', () => {
       ],
     },
   };
-  const record = normalizeJiraIssue(ticket, new Map(), BASE_URL);
+  const record = normalizeJiraIssue(ticket, new Map(), new Map(), CONFIG);
   assert.equal(record.fix_versions.length, 2);
   assert.deepEqual(
     record.fix_versions.map((v) => v.name),
@@ -98,7 +99,7 @@ test('normalizeJiraIssue preserves multiple fix versions', () => {
 });
 
 test('normalizeJiraIssue builds the Jira URL and defaults to an empty PR evidence list', () => {
-  const record = normalizeJiraIssue(DONE_TICKET, new Map(), BASE_URL);
+  const record = normalizeJiraIssue(DONE_TICKET, new Map(), new Map(), CONFIG);
   assert.equal(record.jira_url, 'https://arbisoft.atlassian.net/browse/XQ-4821');
   assert.deepEqual(record.linked_prs, []);
 });
@@ -106,30 +107,47 @@ test('normalizeJiraIssue builds the Jira URL and defaults to an empty PR evidenc
 test('normalizeJiraIssue attaches PR evidence from the index when present', () => {
   const evidence = [{ repo: 'bvs-xiangqi/xiangqi-client', pr_number: 4001, pr_state: 'merged' }];
   const prIndex = new Map([['XQ-4821', evidence]]);
-  const record = normalizeJiraIssue(DONE_TICKET, prIndex, BASE_URL);
+  const record = normalizeJiraIssue(DONE_TICKET, prIndex, new Map(), CONFIG);
   assert.deepEqual(record.linked_prs, evidence);
 });
 
 test('normalizeJiraIssue extracts the created_at date', () => {
-  const record = normalizeJiraIssue(DONE_TICKET, new Map(), BASE_URL);
+  const record = normalizeJiraIssue(DONE_TICKET, new Map(), new Map(), CONFIG);
   assert.equal(record.created_at, '2026-06-30T10:00:00.000+0500');
 });
 
 test('normalizeJiraIssue derives cycle-time fields from the changelog map when present', () => {
   const changelog = [
     { created: '2026-07-05T00:00:00Z', items: [{ field: 'status', fromString: 'To Do', toString: 'In Progress' }] },
-    { created: '2026-07-07T00:00:00Z', items: [{ field: 'status', fromString: 'In Progress', toString: 'Code Review' }] },
+    {
+      created: '2026-07-07T00:00:00Z',
+      items: [{ field: 'status', fromString: 'In Progress', toString: 'Code Review' }],
+    },
   ];
   const changelogByKey = new Map([['XQ-4821', changelog]]);
-  const record = normalizeJiraIssue(DONE_TICKET, new Map(), BASE_URL, changelogByKey);
+  const record = normalizeJiraIssue(DONE_TICKET, new Map(), changelogByKey, CONFIG);
   assert.equal(record.first_in_progress_at, new Date('2026-07-05T00:00:00Z').toISOString());
   assert.equal(record.first_code_review_at_after_in_progress, new Date('2026-07-07T00:00:00Z').toISOString());
   assert.equal(record.in_progress_to_code_review_hours, 48);
 });
 
 test('normalizeJiraIssue defaults cycle-time fields to null when no changelog is provided', () => {
-  const record = normalizeJiraIssue(DONE_TICKET, new Map(), BASE_URL);
+  const record = normalizeJiraIssue(DONE_TICKET, new Map(), new Map(), CONFIG);
   assert.equal(record.first_in_progress_at, null);
   assert.equal(record.first_code_review_at_after_in_progress, null);
   assert.equal(record.in_progress_to_code_review_hours, null);
+});
+
+test('normalizeJiraIssue reads a percent-scale AI field without rescaling', () => {
+  const percentConfig = testConfig({ JIRA_AI_CONTRIBUTION_SCALE: 'percent' });
+  const ticket = { key: 'ACME-1', fields: { customfield_11729: 42 } };
+  assert.equal(normalizeJiraIssue(ticket, new Map(), new Map(), percentConfig).ai_contribution_percent, 42);
+});
+
+test('normalizeJiraIssue leaves AP and AI null when those fields are not configured', () => {
+  const minimal = testConfig({ JIRA_ACTUAL_POINTS_FIELD: '', JIRA_AI_CONTRIBUTION_FIELD: '' });
+  const record = normalizeJiraIssue(DONE_TICKET, new Map(), new Map(), minimal);
+  assert.equal(record.sp, 2);
+  assert.equal(record.ap, null);
+  assert.equal(record.ai_contribution_percent, null);
 });

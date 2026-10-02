@@ -1,7 +1,8 @@
+import { guarded } from './_guard.js';
 import { requireDashboardAuth } from './_auth.js';
+import { sendJson } from '../src/http/respond.js';
 
-export default function handler(req, res) {
+export default guarded(function handler(req, res) {
   if (!requireDashboardAuth(req, res)) return;
-  res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
-  res.end(JSON.stringify({ ok: true }));
-}
+  sendJson(res, 200, { ok: true });
+});

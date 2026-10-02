@@ -1,4 +1,5 @@
 function toEvidence(pr) {
+  const review = pr.review ?? {};
   return {
     repo: pr.repo,
     pr_number: pr.number,
@@ -9,11 +10,12 @@ function toEvidence(pr) {
     pr_merged_at: pr.merged_at ?? null,
     pr_ai_checklist_percent: pr.ai_contribution?.checklist_score_percent ?? null,
     pr_commit_co_author_percent: pr.ai_contribution?.commit_ai_percent ?? null,
+    pr_author_login: review.author_login ?? pr.author_login ?? null,
     pr_assignee_login: pr.assignee_login ?? null,
-    pr_reviewers: pr.reviewers ?? [],
-    pr_time_to_first_review_hours: pr.time_to_first_review_hours ?? null,
-    pr_time_to_approval_hours: pr.time_to_approval_hours ?? null,
-    pr_review_completion_time_hours: pr.review_completion_time_hours ?? null,
+    pr_reviewers: review.reviewers ?? [],
+    pr_time_to_first_review_hours: review.time_to_first_review_hours ?? null,
+    pr_time_to_approval_hours: review.time_to_approval_hours ?? null,
+    pr_review_completion_time_hours: review.review_completion_time_hours ?? null,
   };
 }
 
@@ -24,9 +26,9 @@ function toEvidence(pr) {
  * normalize/ticketRecord.js) treats a missing entry as an empty evidence list,
  * never as a negative signal.
  *
- * Note this index is only as complete as the GitHub PR cache's fetch window
- * (bounded by `lookbackDays`) — a ticket resolved via a PR merged long before
- * that window won't show evidence here even though one exists on GitHub.
+ * This index is only as complete as the GitHub PR cache's fetch window
+ * (GITHUB_LOOKBACK_DAYS) — a ticket resolved via a PR merged long before that
+ * window won't show evidence here even though one exists on GitHub.
  */
 export function buildTicketPrIndex(allPrRecords) {
   const index = new Map();

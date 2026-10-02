@@ -21,3 +21,13 @@ test('returns 0 when commits exist but none are AI co-authored', () => {
   const commits = [{ commit: { message: 'Just a manual fix' } }];
   assert.equal(computeCommitAiPercent(commits), 0);
 });
+
+test('recognises any configured AI co-author pattern, escaping regex characters', () => {
+  const commits = [
+    { commit: { message: 'feat: x\n\nCo-authored-by: GitHub Copilot <copilot@github.com>' } },
+    { commit: { message: 'fix: y\n\nCo-Authored-By: Cursor (bot)' } },
+    { commit: { message: 'chore: z' } },
+  ];
+  assert.equal(computeCommitAiPercent(commits, ['claude']), 0);
+  assert.equal(computeCommitAiPercent(commits, ['copilot', 'cursor (bot)']), (2 / 3) * 100);
+});

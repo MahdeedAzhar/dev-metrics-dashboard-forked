@@ -158,3 +158,10 @@ test('combineAiSignals stays unavailable when neither signal is present', () => 
   const combined = combineAiSignals(checklist, null);
   assert.equal(combined.available, false);
 });
+
+test('the checklist heading is configurable and tolerates other heading levels', () => {
+  const body = FULL_CHECKLIST_BODY.replace('#### AI Contribution Checklist', '## AI Usage Report');
+  assert.equal(parseAiChecklist(body).activities.length, 0);
+  const result = parseAiChecklist(body, { heading: 'AI Usage Report' });
+  assert.ok(result.activities.length > 0);
+});
