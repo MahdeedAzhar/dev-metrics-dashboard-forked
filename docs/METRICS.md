@@ -113,6 +113,25 @@ Source: `buildEngineeringActivityTrend`, `buildPrActivityTrend`. PRs are the
 | Per-repository table         | Opened / merged / open counts per repo, with a drill-down list of open PRs.                                       |
 | Developer activity timeline  | The developer's own tickets' completions and their linked PRs opened/merged. Personal timeline, not a comparison. |
 
+### Chart window and bucket size
+
+Counts are _presented_ at whatever granularity the window deserves; the
+underlying per-day counts are unchanged and bucket totals always sum to the
+same numbers.
+
+| Window (first → last activity in the selection) | Bucket | Caption shown      |
+| ----------------------------------------------- | ------ | ------------------ |
+| ≤ 70 days                                       | day    | "Counts per day"   |
+| 71–400 days                                     | week   | "Counts per week"  |
+| > 400 days                                      | month  | "Counts per month" |
+
+The window spans the first to the most recent **activity** (PR opened/merged,
+ticket started, ticket completed) and never runs past today. It is deliberately
+not anchored on ticket creation: a release carrying tickets filed months
+earlier would otherwise stretch the chart across a long empty stretch and
+squash the part being read. The most recent bucket can be partial (a week or
+month still in progress) — read a final dip with that in mind.
+
 PR evidence is only as complete as the GitHub fetch window
 (`GITHUB_LOOKBACK_DAYS` on first run; incremental afterwards). "No linked PR
 found" is neutral.

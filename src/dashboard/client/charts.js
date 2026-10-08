@@ -94,7 +94,9 @@ function buildLineChart(series, options) {
   const opts = options || {};
   const width = opts.width || 640;
   const height = opts.height || 220;
-  const padding = { top: 16, right: 16, bottom: 28, left: 8 };
+  // Left gutter holds the y-axis value labels; without them a reader can see
+  // the shape of a line but not its magnitude.
+  const padding = { top: 16, right: 16, bottom: 28, left: 40 };
   const plotWidth = width - padding.left - padding.right;
   const plotHeight = height - padding.top - padding.bottom;
 
@@ -112,10 +114,22 @@ function buildLineChart(series, options) {
   const xAt = (i) => padding.left + (pointCount <= 1 ? plotWidth / 2 : (i / (pointCount - 1)) * plotWidth);
   const yAt = (value) => padding.top + plotHeight - (value / maxValue) * plotHeight;
 
+  // Per-point dots stop being informative once they touch each other; past
+  // this density the line alone carries the shape (hover detail moves to
+  // invisible wide hit areas below).
+  const showMarkers = pointCount <= 60;
+
   const gridLines = [0, 0.5, 1]
     .map((frac) => {
       const yPos = padding.top + plotHeight * (1 - frac);
       return `<line x1="${padding.left}" y1="${yPos}" x2="${width - padding.right}" y2="${yPos}" class="chart-gridline" />`;
+    })
+    .join('');
+
+  const yAxisLabels = [0, 0.5, 1]
+    .map((frac) => {
+      const yPos = padding.top + plotHeight * (1 - frac);
+      return `<text x="${padding.left - 6}" y="${(yPos + 3).toFixed(1)}" class="chart-axis-label" text-anchor="end">${chartFmtNum(maxValue * frac, maxValue < 5 ? 1 : 0)}</text>`;
     })
     .join('');
 
@@ -124,34 +138,71 @@ function buildLineChart(series, options) {
        <text x="${width - padding.right}" y="${(yAt(opts.referenceLine.value) - 4).toFixed(1)}" class="chart-axis-label" text-anchor="end">${chartEscapeHtml(opts.referenceLine.label)}: ${chartFmtNum(opts.referenceLine.value)}</text>`
     : '';
 
+  const endpoints = [];
   const seriesSvg = nonEmptySeries
     .map((s, seriesIndex) => {
       const color = CHART_SERIES_COLORS[seriesIndex % CHART_SERIES_COLORS.length];
       const pathD = s.points.map((p, i) => `${i === 0 ? 'M' : 'L'} ${xAt(i).toFixed(1)} ${yAt(p.value).toFixed(1)}`).join(' ');
-      const markers = s.points
-        .map(
-          (p, i) =>
-            `<circle cx="${xAt(i).toFixed(1)}" cy="${yAt(p.value).toFixed(1)}" r="2.5" fill="${color}"><title>${chartEscapeHtml(s.name)} — ${chartEscapeHtml(p.date)}: ${chartFmtNum(p.value)}</title></circle>`,
-        )
-        .join('');
+      const markers = showMarkers
+        ? s.points
+            .map(
+              (p, i) =>
+                `<circle cx="${xAt(i).toFixed(1)}" cy="${yAt(p.value).toFixed(1)}" r="2.5" fill="${color}"><title>${chartEscapeHtml(s.name)} — ${chartEscapeHtml(p.date)}: ${chartFmtNum(p.value)}</title></circle>`,
+            )
+            .join('')
+        : s.points
+            // Dense series: no visible dot, but keep a hover target on the
+            // points that actually carry a value so the tooltip still works.
+            .map((p, i) => (p.value === 0 ? '' : `<circle cx="${xAt(i).toFixed(1)}" cy="${yAt(p.value).toFixed(1)}" r="3" fill="transparent"><title>${chartEscapeHtml(s.name)} — ${chartEscapeHtml(p.date)}: ${chartFmtNum(p.value)}</title></circle>`))
+            .join('');
       const lastPoint = s.points[s.points.length - 1];
-      const lastX = xAt(s.points.length - 1);
-      const lastY = yAt(lastPoint.value);
+      endpoints.push({
+        name: s.name,
+        color,
+        value: lastPoint.value,
+        x: xAt(s.points.length - 1),
+        y: yAt(lastPoint.value),
+      });
       return `
         <path d="${pathD}" fill="none" stroke="${color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" />
         ${markers}
-        <circle cx="${lastX.toFixed(1)}" cy="${lastY.toFixed(1)}" r="4" fill="var(--surface-1)" stroke="${color}" stroke-width="2" />
-        <text x="${Math.min(lastX + 6, width - padding.right - 4).toFixed(1)}" y="${(lastY - 6).toFixed(1)}" class="chart-series-label" fill="${color}" text-anchor="${lastX + 6 > width - padding.right - 60 ? 'end' : 'start'}">${chartEscapeHtml(s.name)}: ${chartFmtNum(lastPoint.value)}</text>
       `;
     })
     .join('');
 
+  // Every series ends at the same x, so their direct labels collide whenever
+  // the lines finish close together (very common when they all end at zero).
+  // Lay them out top-to-bottom with a guaranteed gap instead of overprinting.
+  const LABEL_LINE_HEIGHT = 13;
+  const labelSlots = endpoints
+    .map((endpoint, index) => ({ ...endpoint, index }))
+    .sort((a, b) => a.y - b.y);
+  let previousLabelY = -Infinity;
+  for (const slot of labelSlots) {
+    slot.labelY = Math.max(slot.y - 6, previousLabelY + LABEL_LINE_HEIGHT);
+    previousLabelY = slot.labelY;
+  }
+  const overflow = previousLabelY - (height - padding.bottom);
+  if (overflow > 0) for (const slot of labelSlots) slot.labelY -= overflow;
+
+  const endpointSvg = labelSlots
+    .map((slot) => {
+      const anchorAtEnd = slot.x + 6 > width - padding.right - 60;
+      const labelX = anchorAtEnd ? slot.x - 6 : Math.min(slot.x + 6, width - padding.right - 4);
+      return `
+        <circle cx="${slot.x.toFixed(1)}" cy="${slot.y.toFixed(1)}" r="4" fill="var(--surface-1)" stroke="${slot.color}" stroke-width="2" />
+        <text x="${labelX.toFixed(1)}" y="${slot.labelY.toFixed(1)}" class="chart-series-label" fill="${slot.color}" text-anchor="${anchorAtEnd ? 'end' : 'start'}">${chartEscapeHtml(slot.name)}: ${chartFmtNum(slot.value)}</text>
+      `;
+    })
+    .join('');
+
+  const xTickIndexes = pointCount > 4 ? [0, Math.floor((pointCount - 1) / 2), pointCount - 1] : [0, pointCount - 1];
   const xAxisLabels =
     pointCount > 1
-      ? [0, pointCount - 1]
+      ? xTickIndexes
           .map(
             (i) =>
-              `<text x="${xAt(i).toFixed(1)}" y="${height - 6}" class="chart-axis-label" text-anchor="${i === 0 ? 'start' : 'end'}">${chartEscapeHtml(allDates[i])}</text>`,
+              `<text x="${xAt(i).toFixed(1)}" y="${height - 6}" class="chart-axis-label" text-anchor="${i === 0 ? 'start' : i === pointCount - 1 ? 'end' : 'middle'}">${chartEscapeHtml(allDates[i])}</text>`,
           )
           .join('')
       : `<text x="${xAt(0).toFixed(1)}" y="${height - 6}" class="chart-axis-label" text-anchor="middle">${chartEscapeHtml(allDates[0])}</text>`;
@@ -168,8 +219,10 @@ function buildLineChart(series, options) {
 
   const svgContent = `<svg viewBox="0 0 ${width} ${height}" width="100%" height="${height}" role="img" aria-label="${chartEscapeHtml(opts.ariaLabel || 'Line chart')}">
     ${gridLines}
+    ${yAxisLabels}
     ${refLineSvg}
     ${seriesSvg}
+    ${endpointSvg}
     ${xAxisLabels}
   </svg>`;
 
