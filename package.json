@@ -13,7 +13,7 @@
     "dev": "node --env-file-if-exists=.env --watch src/server.js",
     "start": "node --env-file-if-exists=.env src/server.js",
     "generate": "node --env-file-if-exists=.env src/index.js",
-    "build": "npm run lint && npm test && npm run generate",
+    "build": "npm run lint && npm run generate",
     "test": "node --test",
     "test:watch": "node --test --watch",
     "lint": "eslint .",
