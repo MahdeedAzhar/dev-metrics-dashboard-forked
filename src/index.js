@@ -12,6 +12,7 @@ import { summarizePrReviews } from './parse/prReviews.js';
 import { buildTicketPrIndex } from './merge/ticketPrIndex.js';
 import { normalizeJiraIssue } from './normalize/ticketRecord.js';
 import { renderDashboard } from './dashboard/render.js';
+import { mapInBatches } from './utils/concurrency.js';
 import {
   readGithubCache,
   writeGithubCache,
@@ -23,6 +24,8 @@ import {
   writeOutput,
 } from './cache/store.js';
 import { log, warn } from './utils/logger.js';
+
+const API_CONCURRENCY = 5;
 
 function parseArgs(argv) {
   const args = { releases: null };
@@ -87,8 +90,8 @@ async function syncRepo(repo, lookbackCutoffIso, config) {
 
   let maxUpdatedAt = watermark.lastUpdatedAtSeen;
 
-  for (let i = 0; i < newRawPrs.length; i += 1) {
-    const rawPr = newRawPrs[i];
+  let processed = 0;
+  await mapInBatches(newRawPrs, API_CONCURRENCY, async (rawPr) => {
     const activity = await fetchPullRequestActivity(repo, rawPr.number, config);
     cache[rawPr.number] = buildPrRecord(repo, rawPr, activity, config);
     if (!maxUpdatedAt || new Date(rawPr.updated_at) > new Date(maxUpdatedAt)) {
@@ -99,10 +102,11 @@ async function syncRepo(repo, lookbackCutoffIso, config) {
     // it's interrupted, and so the cache reflects partial progress on disk.
     writeGithubCache(repo, cache);
     writeWatermark(repo, { lastUpdatedAtSeen: maxUpdatedAt, lastRunAt: nowIso });
-    if ((i + 1) % 10 === 0 || i === newRawPrs.length - 1) {
-      log(`${repo}: processed ${i + 1}/${newRawPrs.length} PR(s)`);
+    processed += 1;
+    if (processed % 10 === 0 || processed === newRawPrs.length) {
+      log(`${repo}: processed ${processed}/${newRawPrs.length} PR(s)`);
     }
-  }
+  });
 
   if (newRawPrs.length === 0) {
     writeWatermark(repo, { lastUpdatedAtSeen: maxUpdatedAt ?? effectiveWatermark, lastRunAt: nowIso });
@@ -152,15 +156,16 @@ async function syncChangelogs(rawIssues, config) {
     `Changelogs: ${toFetch.length} ticket(s) need (re)fetching, ${rawIssues.length - toFetch.length} unchanged since last cache`,
   );
 
-  for (let i = 0; i < toFetch.length; i += 1) {
-    const issue = toFetch[i];
+  let processed = 0;
+  await mapInBatches(toFetch, API_CONCURRENCY, async (issue) => {
     const values = await fetchTicketChangelog(issue.key, config);
     cache[issue.key] = { cachedForUpdated: issue.fields.updated, values };
     writeJiraChangelogsCache(cache);
-    if ((i + 1) % 10 === 0 || i === toFetch.length - 1) {
-      log(`Changelogs: fetched ${i + 1}/${toFetch.length}`);
+    processed += 1;
+    if (processed % 10 === 0 || processed === toFetch.length) {
+      log(`Changelogs: fetched ${processed}/${toFetch.length}`);
     }
-  }
+  });
 
   const changelogByKey = new Map();
   for (const issue of rawIssues) {
