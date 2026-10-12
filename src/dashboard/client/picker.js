@@ -1289,7 +1289,7 @@
       var controller = new AbortController();
       var refreshTimeout = window.setTimeout(function () {
         controller.abort();
-      }, 120000);
+      }, 280000);
 
       button.disabled = true;
       button.textContent = 'Refreshing…';
