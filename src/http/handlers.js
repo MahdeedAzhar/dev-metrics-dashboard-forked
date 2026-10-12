@@ -132,7 +132,7 @@ export async function handleAssistant({ body, getBundle, refresh, config = getCo
 }
 
 /** GET /api/refresh */
-export async function handleRefresh({ refresh, timeoutMs = 120000 }) {
+export async function handleRefresh({ refresh, timeoutMs = 270000 }) {
   let timer;
   const timeout = new Promise((_, reject) => {
     timer = setTimeout(() => reject(new Error('Dashboard refresh timed out.')), timeoutMs);
