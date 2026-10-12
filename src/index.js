@@ -76,7 +76,7 @@ export function buildPrRecord(repo, rawPr, activity, config = getConfig()) {
   };
 }
 
-async function syncRepo(repo, lookbackCutoffIso, config) {
+async function syncRepo(repo, lookbackCutoffIso, config, onProgress) {
   const cache = readGithubCache(repo);
   const watermark = readWatermark(repo);
   const nowIso = new Date().toISOString();
@@ -85,8 +85,14 @@ async function syncRepo(repo, lookbackCutoffIso, config) {
   // instead of paging through the repo's entire PR history.
   const effectiveWatermark = watermark.lastUpdatedAtSeen ?? lookbackCutoffIso;
 
+  onProgress?.(`Fetching updated pull requests from ${repo}…`);
   const newRawPrs = await fetchNewOrUpdatedPullRequests(repo, effectiveWatermark, config);
   log(`${repo}: ${newRawPrs.length} new/updated PR(s) since ${effectiveWatermark}`);
+  onProgress?.(
+    newRawPrs.length
+      ? `Fetching activity for ${newRawPrs.length} updated pull requests in ${repo}…`
+      : `No updated pull requests in ${repo}; using cached activity.`,
+  );
 
   let maxUpdatedAt = watermark.lastUpdatedAtSeen;
 
@@ -103,6 +109,7 @@ async function syncRepo(repo, lookbackCutoffIso, config) {
     writeGithubCache(repo, cache);
     writeWatermark(repo, { lastUpdatedAtSeen: maxUpdatedAt, lastRunAt: nowIso });
     processed += 1;
+    onProgress?.(`Fetched pull-request activity ${processed}/${newRawPrs.length} from ${repo}.`);
     if (processed % 10 === 0 || processed === newRawPrs.length) {
       log(`${repo}: processed ${processed}/${newRawPrs.length} PR(s)`);
     }
@@ -120,12 +127,12 @@ async function syncRepo(repo, lookbackCutoffIso, config) {
  * revoked access) is reported and skipped so the Jira half of the dashboard
  * still renders; the failure is recorded in the bundle's `warnings`.
  */
-async function syncAllRepos(config, warnings) {
+async function syncAllRepos(config, warnings, onProgress) {
   const lookbackStart = new Date(Date.now() - config.github.lookbackDays * 24 * 60 * 60 * 1000).toISOString();
   const allPrRecords = [];
   for (const repo of config.github.repos) {
     try {
-      allPrRecords.push(...(await syncRepo(repo, lookbackStart, config)));
+      allPrRecords.push(...(await syncRepo(repo, lookbackStart, config, onProgress)));
     } catch (error) {
       // Keep whatever was cached so a token hiccup degrades to "stale PR
       // evidence" rather than "no PR evidence".
@@ -136,6 +143,7 @@ async function syncAllRepos(config, warnings) {
         `GitHub: could not sync ${repo} (${error.message}). ` +
           (cached.length ? `Showing ${cached.length} previously cached PR(s).` : 'No cached PRs available.'),
       );
+      onProgress?.(`Could not fetch ${repo}; showing ${cached.length} cached pull requests.`);
     }
   }
   return allPrRecords;
@@ -149,11 +157,16 @@ async function syncAllRepos(config, warnings) {
  * `updated` changes on any field edit, not just a status transition, so this
  * is a conservative invalidation key that never under-fetches.
  */
-async function syncChangelogs(rawIssues, config) {
+async function syncChangelogs(rawIssues, config, onProgress) {
   const cache = readJiraChangelogsCache();
   const toFetch = rawIssues.filter((issue) => cache[issue.key]?.cachedForUpdated !== issue.fields.updated);
   log(
     `Changelogs: ${toFetch.length} ticket(s) need (re)fetching, ${rawIssues.length - toFetch.length} unchanged since last cache`,
+  );
+  onProgress?.(
+    toFetch.length
+      ? `Fetching Jira histories for ${toFetch.length} updated tickets (${rawIssues.length - toFetch.length} cached)…`
+      : `Jira histories are up to date (${rawIssues.length} tickets cached).`,
   );
 
   let processed = 0;
@@ -162,6 +175,7 @@ async function syncChangelogs(rawIssues, config) {
     cache[issue.key] = { cachedForUpdated: issue.fields.updated, values };
     writeJiraChangelogsCache(cache);
     processed += 1;
+    onProgress?.(`Fetched Jira history ${processed}/${toFetch.length}: ${issue.key}.`);
     if (processed % 10 === 0 || processed === toFetch.length) {
       log(`Changelogs: fetched ${processed}/${toFetch.length}`);
     }
@@ -185,27 +199,36 @@ async function syncChangelogs(rawIssues, config) {
 export async function generateDashboard({
   releases: overrideReleases = null,
   writeOutput: shouldWriteOutput = true,
+  onProgress,
 } = {}) {
   const config = getConfig();
   const now = new Date();
   const warnings = [];
 
+  onProgress?.('Finding Jira releases…');
   const releases = await resolveReleases({ override: overrideReleases, config, now });
   const releaseNames = releases.map((r) => r.name);
+  onProgress?.(
+    releaseNames.length
+      ? `Found ${releaseNames.length} Jira release${releaseNames.length === 1 ? '' : 's'}; preparing dashboard data…`
+      : 'No Jira releases found; preparing the dashboard…',
+  );
   if (releaseNames.length === 0) {
     warnings.push(
       `Jira: no releases found for project ${config.jira.projectKey}. Create a version (fixVersion) in Jira or set JIRA_RELEASES.`,
     );
   }
 
-  const allPrRecords = config.features.github ? await syncAllRepos(config, warnings) : [];
+  const allPrRecords = config.features.github ? await syncAllRepos(config, warnings, onProgress) : [];
 
   log(`Fetching Jira tickets for release(s): ${releaseNames.join(', ') || '(none)'}`);
+  onProgress?.(`Fetching Jira tickets for ${releaseNames.join(', ') || 'the configured project'}…`);
   const rawIssues = await fetchTicketsByFixVersions(releaseNames, config);
   log(`Found ${rawIssues.length} ticket(s) across the configured release(s)`);
+  onProgress?.(`Fetched ${rawIssues.length} Jira tickets; preparing ticket histories…`);
 
   const ticketPrIndex = buildTicketPrIndex(allPrRecords);
-  const changelogByKey = await syncChangelogs(rawIssues, config);
+  const changelogByKey = await syncChangelogs(rawIssues, config, onProgress);
 
   const ticketsByKey = {};
   for (const issue of rawIssues) {
@@ -226,6 +249,7 @@ export async function generateDashboard({
     const dashboardPath = writeOutput('dashboard.html', renderDashboard(bundle));
     log(`Wrote ${dashboardPath}`);
   }
+  onProgress?.('Finishing dashboard update…');
   return bundle;
 }
 
